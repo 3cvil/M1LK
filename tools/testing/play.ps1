@@ -92,6 +92,8 @@ function Pan([int] $dx, [int] $dy, [double] $sec, $step) {
 }
 function Focus {
     [PI]::ShowWindow($script:p.MainWindowHandle, 9) | Out-Null
+    # Windows only lets a process take the foreground right after input: tap Alt first
+    [PI]::Key(0x12, $false); [PI]::Key(0x12, $true)
     [PI]::SetForegroundWindow($script:p.MainWindowHandle) | Out-Null
     Start-Sleep -Milliseconds 400
     if (-not (Test-Front)) { Log 'focus' 'skipped'; return $false }
@@ -132,6 +134,7 @@ while (-not $script:p.HasExited) {
     }
     while (((Get-Date) - $start).TotalSeconds -lt $Cycle -and -not $script:p.HasExited) { Start-Sleep 2 }
 }
+
 
 
 

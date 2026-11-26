@@ -4,8 +4,12 @@
 param([Parameter(Mandatory)] [string] $Name, [hashtable] $Env = @{}, [int] $Seconds = 1200,
       [string] $Console = 'series-x', [string] $Mode = '--no-rt',
       [string] $Install = (Join-Path $env:LOCALAPPDATA 'M1LK Test'),
-      [int] $PlayAfter = 620, [switch] $NoPlay, [string] $FromSave = '')
+      [int] $PlayAfter = 620, [switch] $NoPlay, [string] $FromSave = '',
+      [ValidateSet('','short','quick','full','soak')] [string] $Kind = '')
 $tools = $PSScriptRoot
+# Test kinds: short = 8 min, load/menus/crash-at-load checks (no play; e.g. Series S fails at 2.5-4 min), quick = one lever A/B (~2-4 min of play after load), full = new build (20 min),
+# soak = stability and memory growth (40 min). -Seconds still overrides when given.
+if ($Kind -and -not $PSBoundParameters.ContainsKey('Seconds')) { $Seconds = @{ short = 480; quick = 900; full = 1200; soak = 2400 }[$Kind] }
 # Wait (max 10 min) for builds to finish so they don't skew memory numbers.
 $t0 = Get-Date
 while ((Get-Process cargo, rustc -ErrorAction SilentlyContinue) -and ((Get-Date) - $t0).TotalMinutes -lt 10) { Start-Sleep 10 }
@@ -37,6 +41,7 @@ $ka = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList "-NoP
 $gpu = Start-Process "$env:WINDIR\System32\nvidia-smi.exe" -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $out 'gpu.csv') -ArgumentList '--query-gpu=timestamp,clocks.gr,clocks.mem,temperature.gpu,power.draw,utilization.gpu,memory.used,pstate,clocks_throttle_reasons.active --format=csv -l 1'
 $watch = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tools\watch.ps1`" -Out `"$out`" -LogDir `"$Install\logs`""
 # real keyboard/mouse play: movement, mouse look, pause menu (tools\play.ps1)
+if ($Kind -eq 'short') { $NoPlay = [switch]::Present }
 $play = if (-not $NoPlay) { Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tools\play.ps1`" -Out `"$out`" -StartAfter $PlayAfter" }
 $launch = [scriptblock]::Create("Start-Process '$Install\victory-play.exe' -ArgumentList '$Mode','--console','$Console','`"$game`"' -WorkingDirectory '$Install'")
 & "$tools\probe.ps1" -Name $Name -Launch $launch -Process 'victory' -Seconds $Seconds
@@ -61,6 +66,8 @@ if ($saves) {
         "new checkpoint saved -> $dest"
     }
 }"done $Name -> $out"
+
+
 
 
 
