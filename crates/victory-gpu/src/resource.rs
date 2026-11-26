@@ -1571,9 +1571,35 @@ pub(crate) fn room() -> bool {
         return true;
     }
     match crate::host::host().and_then(|h| h.video_memory()) {
-        Some([budget, used, ..]) => used < budget / 100 * room_percent(),
+        // What is kept for the render targets a world makes in its first
+        // frame ([`targets_room_kept`]) counts as used.
+        Some([budget, used, ..]) => used + targets_room_kept() < budget / 100 * room_percent(),
         None => filled < WITHOUT_BUDGET,
     }
+}
+
+/// The bytes of the card's memory the texture queue leaves free for the
+/// render targets the host itself makes, which come with no room test in
+/// the first frame of a world, after the queue has filled the card to its
+/// line with textures: `VICTORY_CARD_ROOM_FOR_TARGETS_MB` (3,072; 0: none;
+/// at most 8,192) less what such targets hold now. Without it the card
+/// stands past its budget at that frame and the system moves card memory
+/// into the PC's. Ported from martindevbr/VItoria-Spark.
+#[cfg(windows)]
+pub(crate) fn targets_room_kept() -> u64 {
+    use std::sync::atomic::Ordering::Relaxed;
+    static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let most = *MOST.get_or_init(|| {
+        std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(3072 << 20, |mb| mb.min(8192) << 20)
+    });
+    // Every host texture's bytes less those of the copies the title fills.
+    let targets = HOST_TEXTURES[1]
+        .load(Relaxed)
+        .saturating_sub(KINDS[1].load(Relaxed));
+    most.saturating_sub(targets)
 }
 
 /// The share of the card's budget, in percent, up to which host copies of
@@ -1845,14 +1871,18 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
 #[cfg(windows)]
 pub(crate) fn let_go_idle() {
     use std::sync::atomic::Ordering::Relaxed;
-    const IDLE_FRAMES: u64 = 4;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
         return;
     }
     let video = crate::host::host().and_then(|h| h.video_memory());
-    let idle_ms = crate::host::vram_idle_ms(video);
-    let mut reuse_budget = texture_reuse_budget(video);
+    // Under system-RAM pressure (`crate::host::sweep_band`) the card's
+    // copies go sooner, frames or not, and none is kept for reuse: the
+    // commit they hold is what the machine runs out of.
+    let band = crate::host::sweep_band();
+    let idle_frames = crate::host::band_frames(band, 4);
+    let idle_ms = crate::host::band_idle_ms(band, crate::host::vram_idle_ms(video));
+    let mut reuse_budget = if band == crate::host::RamBand::High { 0 } else { texture_reuse_budget(video) };
     // For the trail (`crate::host::trail`): how many went, their bytes,
     // and the first one.
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);
@@ -1868,7 +1898,7 @@ pub(crate) fn let_go_idle() {
             let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
             let used = r.host.used.load(Relaxed);
             let idle = made.as_ref().is_some_and(|(host, _)| {
-                if !crate::host::long_ago(used, idle_ms, IDLE_FRAMES)
+                if !crate::host::long_ago(used, idle_ms, idle_frames)
                     || std::sync::Arc::strong_count(host) != 1
                     || crate::host::references(&host.texture) != 1
                 {
@@ -1876,7 +1906,7 @@ pub(crate) fn let_go_idle() {
                 }
                 let reused_placed = r.host.gone.load(Relaxed) && r.host.placed.load(Relaxed);
                 if reused_placed && reuse_budget != 0 && host.bytes() <= reuse_budget
-                    && !crate::host::long_ago(used, 3 * idle_ms, IDLE_FRAMES)
+                    && !crate::host::long_ago(used, 3 * idle_ms, idle_frames)
                 {
                     reuse_budget -= host.bytes();
                     return false;
@@ -2260,6 +2290,11 @@ fn host_texture(
     // A mip-dropped host texture: the title's mip `mip_drop` is its mip 0.
     if mip_drop > 0 {
         apply_mip_drop(&mut d, desc, u32::from(mip_drop));
+        static DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if n == 1 || n.is_multiple_of(256) {
+            tracing::info!(n, mip_drop, width = desc.width, height = desc.height, "host textures made with mips dropped so far");
+        }
     }
     // SAFETY: as above.
     let native: &D3D12_RESOURCE_DESC = unsafe { &*(&raw const d).cast() };
@@ -2335,7 +2370,30 @@ pub(crate) fn compute_mip_drop(desc: &ResourceDesc) -> u32 {
         return 0;
     }
     let min_size = crate::texture::texture_mip_drop_min_size();
-    compute_mip_drop_explicit(desc, drop, min_size)
+    let n = compute_mip_drop_explicit(desc, drop, min_size);
+    mip_drop_limits(
+        desc,
+        n,
+        crate::texture::texture_mip_drop_floor(),
+        crate::texture::texture_mip_cap(),
+    )
+}
+
+/// `n` levels to drop, held to a floor (the new top level at least that
+/// many texels each way) and a cap (only as many levels as bring the
+/// larger side to the cap; at or under it, none). Both opt in
+/// (`VICTORY_TEXTURE_MIP_DROP_FLOOR`, `VICTORY_TEXTURE_MIP_CAP`).
+pub(crate) fn mip_drop_limits(desc: &ResourceDesc, mut n: u32, floor: Option<u64>, cap: Option<u64>) -> u32 {
+    if let Some(floor) = floor {
+        while n > 0 && (desc.width >> n < floor || u64::from(desc.height) >> n < floor) {
+            n -= 1;
+        }
+    }
+    if let Some(cap) = cap {
+        let side = desc.width.max(u64::from(desc.height));
+        n = (0..=n).find(|&k| side >> k <= cap).unwrap_or(n);
+    }
+    n
 }
 
 pub(crate) fn compute_mip_drop_explicit(desc: &ResourceDesc, drop: u32, min_size: u64) -> u32 {
@@ -3185,6 +3243,18 @@ mod tests {
             S_OK
         );
         heap
+    }
+
+    #[test]
+    fn mip_drop_floor_and_cap_hold_the_drop() {
+        let t = texture(4096, 4096, 71, 13);
+        assert_eq!(mip_drop_limits(&t, 3, None, None), 3);
+        assert_eq!(mip_drop_limits(&t, 3, Some(1024), None), 2);
+        assert_eq!(mip_drop_limits(&t, 3, Some(4096), None), 0);
+        assert_eq!(mip_drop_limits(&t, 3, None, Some(1024)), 2);
+        assert_eq!(mip_drop_limits(&t, 1, None, Some(1024)), 1);
+        let small = texture(1024, 1024, 71, 11);
+        assert_eq!(mip_drop_limits(&small, 1, None, Some(1024)), 0);
     }
 
     #[test]

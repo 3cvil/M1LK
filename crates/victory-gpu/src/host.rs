@@ -170,6 +170,97 @@ pub(crate) fn ram_idle_ms(avail_phys: Option<u64>) -> u64 {
     }
 }
 
+/// System-RAM pressure band for optional caches. Resident working set and
+/// private bytes describe this process; free physical and commit headroom
+/// guard the PC and other processes. Windows API queries never change the
+/// pagefile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RamBand {
+    Calm,
+    Watch,
+    High,
+}
+
+/// Band for one sample. Entering Watch or High needs a higher watermark than
+/// leaving it, so a value near a threshold does not toggle the policy every
+/// sample.
+pub(crate) fn ram_band(
+    previous: RamBand,
+    working: u64,
+    private: u64,
+    free_physical: u64,
+    commit_headroom: u64,
+    total_physical: u64,
+    commit_limit: u64,
+) -> RamBand {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    // Fractions of the machine, so a 64 GB host is not treated like the
+    // 32 GB one. The free and headroom floors stay absolute: pressure is
+    // pressure however big the machine is.
+    let high = private * 5 >= commit_limit * 4
+        || working * 2 >= total_physical
+        || free_physical < 2 * GIB
+        || commit_headroom < GIB;
+    let watch = private * 10 >= commit_limit * 7
+        || working * 4 >= total_physical
+        || free_physical < 4 * GIB
+        || commit_headroom < 2 * GIB;
+    let wanted = if high {
+        RamBand::High
+    } else if watch {
+        RamBand::Watch
+    } else {
+        RamBand::Calm
+    };
+    let safe_high = private * 20 <= commit_limit * 13
+        && working * 4 <= total_physical
+        && free_physical >= 4 * GIB
+        && commit_headroom >= 3 * GIB;
+    let safe_watch = private * 5 <= commit_limit * 3
+        && working * 5 <= total_physical
+        && free_physical >= 6 * GIB
+        && commit_headroom >= 3 * GIB;
+    match (previous, wanted) {
+        (RamBand::High, RamBand::Calm) if !safe_high => RamBand::Watch,
+        (RamBand::Watch, RamBand::Calm) if !safe_watch => RamBand::Watch,
+        _ => wanted,
+    }
+}
+
+/// The six numbers [`ram_band`] needs, from Windows. `None` if a query fails,
+/// so a caller can keep its old band instead of guessing.
+#[cfg(windows)]
+pub(crate) fn ram_sample() -> Option<(u64, u64, u64, u64, u64, u64)> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: plain data the call fills in.
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return None;
+    }
+    let mut c = PROCESS_MEMORY_COUNTERS {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: our own process and a sized structure.
+    if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } == 0 {
+        return None;
+    }
+    Some((
+        c.WorkingSetSize as u64,
+        c.PagefileUsage as u64,
+        m.ullAvailPhys,
+        m.ullAvailPageFile,
+        m.ullTotalPhys,
+        m.ullTotalPageFile,
+    ))
+}
+
+
 /// How many references are held on a host object (its COM count): ours
 /// all, since the host's views and commands hold none. A buffer or texture
 /// with one is held by its owner alone: no descriptor slot keeps it
@@ -185,6 +276,42 @@ pub(crate) fn references(object: &impl Interface) -> u32 {
         ((*methods)[1])(raw);
         ((*methods)[2])(raw)
     }
+}
+
+/// The RAM band the sweeps work in (`ram_band` over a fresh sample, kept
+/// between calls so one sample near a watermark does not toggle it).
+/// `VICTORY_RAM_SWEEP=0` keeps it Calm: the sweeps then behave as before.
+#[cfg(windows)]
+pub(crate) fn sweep_band() -> RamBand {
+    static ON: OnceLock<bool> = OnceLock::new();
+    static BAND: std::sync::Mutex<RamBand> = std::sync::Mutex::new(RamBand::Calm);
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_RAM_SWEEP").is_none_or(|v| v != "0")) {
+        return RamBand::Calm;
+    }
+    let mut band = BAND.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((working, private, free, commit, total, limit)) = ram_sample() {
+        *band = ram_band(*band, working, private, free, commit, total, limit);
+    }
+    *band
+}
+
+/// Idle time (ms) after which a sweep may let go of an unused copy in `band`,
+/// never longer than `ms` and never below 2 s (a handle not yet recorded
+/// into a list or slot is protected by idle time alone).
+pub(crate) fn band_idle_ms(band: RamBand, ms: u64) -> u64 {
+    match band {
+        RamBand::Calm => ms,
+        RamBand::Watch => ms.min(5_000),
+        RamBand::High => ms.min(2_000),
+    }
+}
+
+/// Idle frames a sweep asks for in `band`. In the High band the frame
+/// count is not asked for: a title loading with few or no presented frames
+/// never ages anything by frames, and its copies pile up (the idle time
+/// still protects handles in flight).
+pub(crate) fn band_frames(band: RamBand, frames: u64) -> u64 {
+    if band == RamBand::High { 0 } else { frames }
 }
 
 /// Low-RAM threshold (`VICTORY_RAM_TRIM_MB`, in MiB; off by default):
@@ -653,7 +780,19 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
         } else {
-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            // M1LK: on hybrid laptops the default adapter can be the iGPU.
+            // Ask DXGI for the high-performance one (VICTORY_ADAPTER=<index|name>
+            // overrides); any failure falls back to the default adapter.
+            let mut created = false;
+            if let Some(adapter) = pick_hardware_adapter() {
+                match D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device) {
+                    Ok(()) => created = true,
+                    Err(e) => tracing::warn!(error = %e, "chosen adapter refused a device; using the default adapter"),
+                }
+            }
+            if !created {
+                D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            }
         }
         let device = device.ok_or_else(windows::core::Error::empty)?;
         // `VICTORY_D3D12_BACKGROUND=0`: the runtime's background work (the
@@ -767,6 +906,68 @@ impl Host {
 /// builds with `VICTORY_D3D12_WARP`.
 pub(crate) fn on_warp() -> bool {
     cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_WARP").is_some()
+}
+
+/// Adapter name from a DXGI description (UTF-16, NUL terminated).
+fn adapter_name(desc: &DXGI_ADAPTER_DESC1) -> String {
+    let n = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+    String::from_utf16_lossy(&desc.Description[..n])
+}
+
+/// Pick the host's hardware adapter: `VICTORY_ADAPTER=<index|name substring>`
+/// when set, else `IDXGIFactory6::EnumAdapterByGpuPreference(HIGH_PERFORMANCE)`.
+/// Logs the choice (name and VRAM). `None` means "use the default adapter".
+fn pick_hardware_adapter() -> Option<IDXGIAdapter1> {
+    // SAFETY: plain DXGI adapter queries.
+    unsafe {
+        let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        let wanted = std::env::var("VICTORY_ADAPTER").ok().filter(|v| !v.trim().is_empty());
+        let mut picked: Option<(IDXGIAdapter1, DXGI_ADAPTER_DESC1)> = None;
+        if let Some(want) = wanted.as_deref() {
+            let want = want.trim();
+            let index = want.parse::<u32>().ok();
+            let lower = want.to_lowercase();
+            let mut i = 0u32;
+            while let Ok(a) = factory.EnumAdapters1(i) {
+                if let Ok(d) = a.GetDesc1() {
+                    let soft = d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
+                    let hit = match index {
+                        Some(n) => n == i,
+                        None => adapter_name(&d).to_lowercase().contains(&lower),
+                    };
+                    if hit && !soft {
+                        picked = Some((a, d));
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            if picked.is_none() {
+                tracing::warn!(want, "VICTORY_ADAPTER matched no hardware adapter; using the high-performance one");
+            }
+        }
+        if picked.is_none() {
+            let mut i = 0u32;
+            while let Ok(a) = factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE) {
+                if let Ok(d) = a.GetDesc1()
+                    && d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0
+                {
+                    picked = Some((a, d));
+                    break;
+                }
+                i += 1;
+            }
+        }
+        let (a, d) = picked?;
+        tracing::info!(
+            name = %adapter_name(&d),
+            vram_mb = d.DedicatedVideoMemory / (1 << 20),
+            shared_mb = d.SharedSystemMemory / (1 << 20),
+            vendor = format_args!("{:#x}", d.VendorId),
+            "host adapter chosen (VICTORY_ADAPTER=<index|name> overrides)"
+        );
+        Some(a)
+    }
 }
 
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
@@ -2710,9 +2911,20 @@ mod relay_tests {
 /// all at once ran the slots out before (run 45).
 fn late_most() -> usize {
     static MOST: OnceLock<usize> = OnceLock::new();
-    *MOST.get_or_init(|| {
+    let most = *MOST.get_or_init(|| {
         std::env::var("VICTORY_LATE_WAIT_LISTS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(256).max(1)
-    })
+    });
+    if settle_room() { most.saturating_mul(2) } else { most }
+}
+
+/// Whether the flight-list and merge-run budgets are widened (twice
+/// `VICTORY_LATE_WAIT_LISTS`, eight times the 512 changed runs merged
+/// under flights) so fewer flights settle (`VICTORY_SETTLE_ROOM=1`; off by
+/// default). From `KevinPratap/ApexIV` ddf5990 (itself from
+/// `fxceless/victory-fork` `06702fe86`).
+fn settle_room() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SETTLE_ROOM").is_some_and(|v| v == "1"))
 }
 
 /// Whether a submission with bottom-of-pipe writes may fly
@@ -3111,7 +3323,7 @@ fn stale_under_flights(runs: &[&HostList]) -> bool {
         // settle is still due where that could not be done. At most this
         // many changed runs go up to copies in the card's memory, each a
         // copy of its own there.
-        let mut runs_left = 512;
+        let mut runs_left = if settle_room() { 4096 } else { 512 };
         return spans.refreshes.iter().any(|(shadow, from, to)| shadow.merge_under_writes(*from, *to - *from, &mut runs_left));
     }
     spans.refreshes.iter().any(|(shadow, from, to)| shadow.stale_under_writes(*from, *to - *from))
@@ -3241,6 +3453,7 @@ fn land() {
 /// value while the submitting thread waits for that thread would never
 /// see it.
 fn late_helper() {
+    crate::cores::keep_on_fast_cores("victory-late-wait");
     let Some(host) = host() else {
         return;
     };
@@ -3420,6 +3633,7 @@ impl RelayCopyClock {
 /// anything a caller of [`Host::settle`] may hold: resetting the landed
 /// lists and looking at what queues hold are left to [`late_helper`].
 fn relay_worker() {
+    crate::cores::keep_on_fast_cores("victory-relay");
     let Some(host) = host() else {
         return;
     };
@@ -3613,6 +3827,8 @@ fn late_line(frames: f64) {
             );
         }
     }
+    crate::prof::line(frames);
+    crate::port::log(frames);
     if late_exact() {
         let [pages, runs, bytes] = crate::shadow::merged_stats().map(|n| n as f64 / frames);
         tracing::info!(
@@ -4733,7 +4949,7 @@ impl Host {
                             continue;
                         };
                         for (lo, hi) in r.span.changed_ranges(p, mask) {
-                            if seen.insert((copy, lo, hi)) {
+                            if !crate::wc_back::skip_back(r.declared, (hi - lo) as u64) && seen.insert((copy, lo, hi)) {
                                 pieces.push((r.shadow.clone(), lo, hi, 0));
                                 unpacked += (hi - lo) as u64;
                             }
@@ -5019,7 +5235,7 @@ impl Host {
         for (i, r) in plan.ranges.iter().enumerate() {
             for p in 0..r.span.pieces {
                 for (lo, hi) in r.span.changed_ranges(p, r.changed_pages(p, differs)) {
-                    if seen.insert((std::sync::Arc::as_ptr(&r.shadow) as usize, lo, hi)) {
+                    if !crate::wc_back::skip_back(r.declared, (hi - lo) as u64) && seen.insert((std::sync::Arc::as_ptr(&r.shadow) as usize, lo, hi)) {
                         pieces.push((i, lo, hi, total));
                         total += (hi - lo) as u64;
                     }
@@ -5436,6 +5652,9 @@ impl Host {
         crate::copystat::submission_begins();
         let was_working = working(true);
         submitting(1, runs.len());
+        // (Neptune) The stages of this submission, timed (`crate::prof`, VICTORY_SUBMIT_PROF=1).
+        crate::prof::count(crate::prof::C::Submissions, 1);
+        let mut lap = std::time::Instant::now();
         // Under the submission lock, before inspecting dependencies. A remap
         // racing preparation also invalidates this submission's old writes.
         crate::writeback::starting(STARTED.load(Ordering::Relaxed) + 1);
@@ -5453,6 +5672,7 @@ impl Host {
                 self.settle(&mut submitted, why);
             }
         }
+        lap = crate::prof::lap(crate::prof::S::SettleBefore, lap);
         let behind = late && flying();
         // Before this submission counts as started: what the sweep lets go
         // of is named by no list, and nothing runs now (behind flights the
@@ -5469,10 +5689,12 @@ impl Host {
             sweep();
             SWEPT.store(now_ms(), Ordering::Relaxed);
         }
+        lap = crate::prof::lap(crate::prof::S::Sweep, lap);
         let behind = late && flying();
         // The slots that waited for a texture's host copy, before the
         // lists that may read them run.
         crate::descriptor::make_waiting();
+        crate::prof::lap(crate::prof::S::MakeWaiting, lap);
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
         // The ranges shaders write are counted for it (with the relay).
         crate::shadow::preparing(this_submission);
@@ -5569,7 +5791,9 @@ impl Host {
         {
             #[cfg(feature = "diagnostics")]
             let snapshots = std::time::Instant::now();
+            let snap_lap = std::time::Instant::now();
             crate::shadow::take_snapshots();
+            crate::prof::lap(crate::prof::S::Snapshots, snap_lap);
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::SnapshotUs, snapshots.elapsed().as_micros() as u64);
         }
@@ -5582,7 +5806,9 @@ impl Host {
             self.settle(&mut submitted, WHY_MOST);
             settled += settling.elapsed();
         }
+        let card_began = std::time::Instant::now();
         let card = self.card_before(runs, flown);
+        crate::prof::lap(crate::prof::S::CardBefore, card_began);
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
         }
@@ -6896,6 +7122,7 @@ impl HostList {
                         add(C::CopyBytes, len as u64);
                     }
                     batch.title_written();
+                    crate::port::copied(dst, src, len);
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
                     // With the submission's one asking: the journal learns it.
                     crate::watch::wrote(dst, len);
@@ -6903,6 +7130,9 @@ impl HostList {
                 }
                 Step::Fill(_) | Step::Fills(_) => {
                     let fills = step.fills();
+                    for f in fills {
+                        crate::port::filled(f.src, f.len);
+                    }
                     let bytes = fills.iter().map(|f| f.len).sum::<usize>();
                     let jobs = run_fills(fills, fill_workers());
                     #[cfg(feature = "diagnostics")]
@@ -8051,7 +8281,16 @@ impl Meter {
         }
         let (cpu_pct, gpu_pct, ram_mb) = (self.cpu_pct, self.gpu_pct, self.ram_mb);
         crate::debug_hud::update(hwnd, || {
-            format!("M1LK diagnostics\n{fps:.1} FPS   {ms:.1} ms/frame   {draws:.0} draws/frame\nGPU wait {gpu:.1} ms   CPU prep {cpu:.1} ms   Copy-back {back_ms:.1} ms\nDropped {dropped:.0}/frame   RAM {ram_mb:.0} MB")
+            let making = crate::pipeline::making();
+            let texture_mb = crate::draw::HEAP_TEXTURE_BYTES.load(Ordering::Relaxed) >> 20;
+            let waiting = crate::draw::HEAP_TEXTURES_WAITING.load(Ordering::Relaxed);
+            format!(
+                "M1LK diagnostics\n\
+                 {fps:.1} FPS   {ms:.1} ms/frame   {draws:.0} draws/frame\n\
+                 GPU {gpu_pct:.0}% busy, wait {gpu:.1} ms   CPU {cpu_pct:.0}%, prep {cpu:.1} ms\n\
+                 Copy-back {back_ms:.1} ms   Dropped {dropped:.0}/frame   Shaders compiling {making}\n\
+                 RAM {ram_mb:.0} MB   Textures {texture_mb} MB ({waiting} waiting)"
+            )
         });
         let text = format!(
             "M1LK | {fps:.0} fps {ms:.1} ms/frame | gpu {gpu_pct:.0}% busy \
@@ -8098,6 +8337,7 @@ impl Host {
     /// as frame `frame` (saved if captures are on). `None` if nothing was
     /// shown; else, in diagnostics builds, whether the frame was black.
     pub(crate) fn present(&self, texture: &ID3D12Resource, state: u32, frame: u64) -> Option<bool> {
+        let _prof = crate::prof::Scope::new(crate::prof::S::Present);
         // SAFETY: a live resource.
         let desc = unsafe { texture.GetDesc() };
         let Some(format) = swap_format(desc.Format) else {
@@ -8469,6 +8709,83 @@ impl Host {
         }
     }
 
+    /// Whether the device has GPU upload heaps in its own memory (a resizable
+    /// BAR and `D3D12_OPTIONS16.GPUUploadHeapSupported`; vendor-neutral). Asked
+    /// once, said in the log.
+    pub(crate) fn mapped_card_memory(&self) -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS16::default();
+            // SAFETY: plain queries into local structures.
+            let (supported, local) = unsafe {
+                let supported = self
+                    .device
+                    .CheckFeatureSupport(
+                        D3D12_FEATURE_D3D12_OPTIONS16,
+                        (&raw mut options).cast(),
+                        size_of_val(&options) as u32,
+                    )
+                    .is_ok()
+                    && options.GPUUploadHeapSupported.as_bool();
+                let local = supported
+                    && self.device.GetCustomHeapProperties(0, D3D12_HEAP_TYPE_GPU_UPLOAD).MemoryPoolPreference
+                        == D3D12_MEMORY_POOL_L1;
+                (supported, local)
+            };
+            tracing::info!(supported, local, "card memory the CPU maps (GPU upload heaps)");
+            local
+        })
+    }
+
+    /// A buffer in the card's own memory that the CPU maps
+    /// (`D3D12_HEAP_TYPE_GPU_UPLOAD`) and shaders read and may write, in the
+    /// common state; `None` without [`Self::mapped_card_memory`]. The CPU
+    /// should only write it: a read of the mapping crosses the bus a few
+    /// bytes at a time (8 MB/s measured on a laptop RTX 4060, writes 1.3
+    /// GB/s on one thread).
+    pub(crate) fn mapped_card_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        if !self.mapped_card_memory() {
+            return None;
+        }
+        let heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_GPU_UPLOAD,
+            ..Default::default()
+        };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: size.max(1),
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut buffer: Option<ID3D12Resource> = None;
+        let mut data = std::ptr::null_mut();
+        let no_reads = D3D12_RANGE { Begin: 0, End: 0 };
+        // SAFETY: plain creation and mapping of a CPU-visible buffer.
+        let made = unsafe {
+            self.device
+                .CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut buffer)
+                .and_then(|()| {
+                    let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
+                    b.Map(0, Some(&raw const no_reads), Some(&mut data))
+                })
+        };
+        match made {
+            Ok(()) => Some((buffer?, data.cast())),
+            Err(e) => {
+                tracing::warn!(error = %e, size, "no buffer in card memory the CPU maps");
+                None
+            }
+        }
+    }
+
     /// A device-local buffer shaders may write (unordered access) and indirect
     /// execution may read, starting in the common state.
     pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
@@ -8729,7 +9046,68 @@ mod spare {
 
 #[cfg(test)]
 mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at the top of this file
-    use super::Batch;
+    use super::{Batch, RamBand, ram_band};
+
+    #[test]
+    fn ram_band_tracks_resident_and_commit_pressure() {
+        const M: u64 = 1 << 20;
+        // The measured local Series S baseline stayed calm (32 GB machine,
+        // roughly 11 GB commit limit).
+        assert_eq!(
+            ram_band(RamBand::Calm, 3857 * M, 7500 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M),
+            RamBand::Calm
+        );
+        // Private commit alone crosses the watch watermark.
+        assert_eq!(
+            ram_band(RamBand::Calm, 3857 * M, 8200 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M),
+            RamBand::Watch
+        );
+        // The measured Series X commit failure was High.
+        assert_eq!(
+            ram_band(RamBand::Calm, 4452 * M, 10191 * M, 16047 * M, 154 * M, 32 * 1024 * M, 11 * 1024 * M),
+            RamBand::High
+        );
+    }
+
+    #[test]
+    fn band_sweeps_tighten_only_under_pressure() {
+        use crate::host::{band_frames, band_idle_ms};
+        assert_eq!(band_idle_ms(RamBand::Calm, 10_000), 10_000);
+        assert_eq!(band_idle_ms(RamBand::Watch, 10_000), 5_000);
+        assert_eq!(band_idle_ms(RamBand::High, 10_000), 2_000);
+        assert_eq!(band_idle_ms(RamBand::High, 1_000), 1_000, "never longer than asked");
+        assert_eq!(band_frames(RamBand::Calm, 4), 4);
+        assert_eq!(band_frames(RamBand::Watch, 4), 4);
+        assert_eq!(band_frames(RamBand::High, 4), 0);
+    }
+
+    #[test]
+    fn ram_band_exits_only_below_lower_watermarks() {
+        const M: u64 = 1 << 20;
+        assert_eq!(
+            ram_band(RamBand::High, 4452 * M, 8900 * M, 16047 * M, 1200 * M, 32 * 1024 * M, 11 * 1024 * M),
+            RamBand::Watch,
+            "just under the entry mark does not drop straight to calm"
+        );
+        assert_eq!(
+            ram_band(RamBand::Watch, 3857 * M, 6600 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M),
+            RamBand::Calm,
+            "all lower watermarks met"
+        );
+    }
+
+    #[test]
+    fn ram_band_does_not_toggle_below_the_entry_watermark() {
+        const M: u64 = 1 << 20;
+        let mut band = RamBand::Calm;
+        for private in [7500 * M, 8200 * M, 8200 * M, 8200 * M] {
+            band = ram_band(band, 3857 * M, private, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M);
+        }
+        assert_eq!(band, RamBand::Watch);
+        band = ram_band(band, 3857 * M, 7800 * M, 15900 * M, 3962 * M, 32 * 1024 * M, 11 * 1024 * M);
+        assert_eq!(band, RamBand::Watch);
+    }
+
     use std::sync::Arc;
 
     #[test]

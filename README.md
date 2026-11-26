@@ -25,10 +25,10 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | Goal | Status |
 | --- | --- |
 | 1. Boot to the first loaded scene | Done. Menus, the intro and the first cutscene load and draw. |
-| 2. Peak memory 13 GB or less | **In progress.** 17.2 GB on the first measured build; 20.0 GB on the 26 Nov build. A fix for duplicated texture copies is being worked on. |
+| 2. Peak memory 13 GB or less | **In progress.** Peak 21.6 GB on Series X. New savers, now being tested: title windows in VRAM (needs Resizable BAR), constants ported to the card, and 2 MB memory sections. Series S (the title budgets 7.8 GB instead of 13.5 GB) is the next big lever, but it currently crashes on the first scene and is being debugged. |
 | 3. Stable for 30 minutes | **Close.** The latest run lasted the full 20-minute test with no crash (earlier runs: 5 min 46 s, then 10 min 19 s). |
-| 4. Full ray tracing on NVIDIA | Being worked on: BVH builder and wave32 fixes. Not yet measured in game. |
-| 5. 30 fps with ray tracing | Not started. Menus run at 30 fps; in game, without RT, the median is 0.5 fps because about 80% of each frame is spent waiting on memory paging. Next: cut RAM, then DLSS Super Resolution and P-core thread placement. |
+| 4. Full ray tracing on NVIDIA | BVH builder and wave32 fixes are merged. It will be measured once in-game fps is about 5 or more (shadows, then reflections, then full GI). |
+| 5. 30 fps with ray tracing | Not yet. Menus run at 30 fps; in game, without RT, the median is 0.5 fps because about 80% of each frame is spent waiting on memory paging. The merged build has DLSS Super Resolution, P-core thread placement and a frame-interval switch ready to measure. Frame generation numbers will always be reported next to real fps. |
 
 ### Test log
 
@@ -39,6 +39,31 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | 2026-11-26 | RAM branch + pressure sweeps | Series X, `--no-rt`, mip drop 2 (textures of 512 px and up), window budget 1 GB, RAM trim 3 GB | **20 min with no crash** (the full test). Menus at 30 fps; in game a median of 0.5 fps, with frames spending 0.9 s (median) to 9.6 s (worst quarter) waiting on paging. Peak 21.6 GB, 6.8 GB of VRAM. The largest memory buckets were made shared buffers (8.1 GB), title window copies (5.2 GB) and host textures (5.0 GB). |
 
 This table is updated after every test run.
+
+## What's in M1LK (26 Nov 2026)
+
+Everything here is opt-in unless marked as a default, so the upstream (including AMD) behaviour is unchanged.
+
+| Area | Switch | What it does |
+| --- | --- | --- |
+| Stability | `VICTORY_NO_WATCHDOG` (on by default in the launcher) | Byte-checked patch that stops the title's watchdog from killing a slow frame. From VItoria-Spark. |
+| RAM | `VICTORY_RAM_SWEEP` (default on), `VICTORY_WINDOW_BUDGET_MB`, `VICTORY_RAM_TRIM_MB` | Lets go of host copies that only the title still holds, and trims the working set under pressure. |
+| RAM | `VICTORY_WINDOWS_BAR_MB=1536`, `VICTORY_WINDOWS_BAR_FREE_MB=512` | Puts title windows in card memory the CPU writes directly (Resizable BAR), instead of locked system RAM. |
+| RAM | `VICTORY_PORT_CONSTANTS=1` | Constant buffers stay on the card (about 170 MB and about 6,000 fills a frame less). From cool_fox. |
+| RAM | `VICTORY_SECTION_MB=2` | Physical memory in 2 MB sections (faster remaps). From ApexIV. |
+| RAM / picture | `VICTORY_TEXTURE_MIP_DROP`, `_MIN_SIZE`, `_FLOOR`, `VICTORY_TEXTURE_MIP_CAP` | Drops the top texture levels to save memory. A temporary trade: it makes surfaces softer. |
+| fps | `VICTORY_UPSCALER=dlss`, `VICTORY_DLSS=quality\|balanced\|performance` | DLSS Super Resolution in place of the title's FSR. NVIDIA's DLL is loaded at runtime from your own driver and a `dlss` folder; M1LK ships no NVIDIA code (see `docs/dlss.md` and `tools/Setup-Dlss.ps1`). |
+| fps | `VICTORY_FAST_CORES` (default 2) | Puts our submit and relay threads on P-cores and shader compilers on E-cores (hybrid Intel CPUs). From cool_fox. |
+| fps | `VICTORY_ADAPTER` (default: high-performance GPU) | Always picks the NVIDIA GPU on Optimus laptops, and logs which one it used. |
+| fps | `VICTORY_FRAME_INTERVAL_MS`, `VICTORY_TITLE_FPS`, `VICTORY_RENDER_SCALE`, `VICTORY_OUTPUT` | Frame pacing, render scale and output size. From cool_fox. |
+| fps | `VICTORY_SKIP_WC_BACK=1` | Skips copying back write-combined memory the CPU never reads. From VItoria-Spark. |
+| Shaders | `VICTORY_WARM_LOADERS`, `VICTORY_PIPELINE_WORKERS`, pipeline book | Faster warm, and records draw states so the next warm can build the graphics pipelines ahead of time. |
+| Correctness | `VICTORY_BC7_ROTATION`, `VICTORY_INDIRECT_ZERO_GARBAGE`, `VICTORY_SDWA_SEXT_16`, `VICTORY_SETTLE_ROOM` | Picture and stability fixes from ApexIV. |
+| Debugging | `VICTORY_SUBMIT_PROF`, `VICTORY_LOG_THREAD`, `VICTORY_MEMORY_CATEGORIES`, HUD | Per-frame cost and memory breakdowns. |
+
+**Testing tools** (`tools/testing`): `run-m1lk.ps1` runs a full playtest. It keeps the PC awake, takes screenshots when the picture changes, samples memory, paging and GPU clocks/temperature/power each second, and finishes with a chart. `breakdown.py` ranks where frame time and memory go (paging stalls, copies, GPU, copy-back) and compares two runs. `perf-chart.py` draws the fps, draw and memory chart.
+
+**Known issues:** the Series S profile crashes (device removed) on the first real scene. Hair can render as stray lines, which a fix is on the way for. About a third of draws are still skipped (no pipeline yet, or an unsupported indirect draw), which can make walls look see-through.
 
 ## Legal notice
 
@@ -431,6 +456,14 @@ Upstream also credits:
   shader translation and memory synchronization. [XCL](https://github.com/xcl-dev/xcl)
 - **AMD** for the FidelityFX/FSR upscaler used by the optional FSR profiles.
   [AMD FSR SDK](https://gpuopen.com/amd-fsr-sdk/)
+
+M1LK also ports work from these forks, credited in each commit:
+
+- **DoubleGhosty/cool_fox**: renderer port 1 (constants on the card), frame interval, render scale, hybrid-CPU placement.
+- **martindevbr/VItoria-Spark**: watchdog patch, write-combined copy-back skip, card room for render targets.
+- **KevinPratap/ApexIV**: memory sections, mip-drop limits, BC7, indirect and SDWA fixes, and the DLSS backend design.
+- **Dolberthi/neptune-dolberth-nvidia-8gb**: lock-free write watch, submit profiler, log thread.
+- The Resizable BAR window placement follows an earlier upstream change ("Card memory the CPU maps").
 
 The full upstream commit history and author list are available in the upstream repositories linked above.
 

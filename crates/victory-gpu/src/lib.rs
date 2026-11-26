@@ -18,12 +18,15 @@
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
 pub mod console;
+pub mod cores;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
 #[cfg(windows)]
 mod debug_hud;
 pub mod descriptor;
 pub mod device;
+#[cfg(windows)]
+pub mod dlss;
 #[cfg(windows)]
 mod draw;
 pub mod dxgi;
@@ -39,6 +42,11 @@ mod indirect;
 mod inplace;
 #[cfg(windows)]
 mod material_demand;
+#[cfg(windows)]
+mod port;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod prof;
 pub mod list;
 pub mod object;
 pub mod pipeline;
@@ -58,7 +66,11 @@ mod memory;
 mod shadow;
 pub mod signature;
 #[cfg(windows)]
+pub mod upscale;
+#[cfg(windows)]
 mod texture;
+#[cfg(windows)]
+mod wc_back;
 #[cfg(windows)]
 mod tiles;
 #[cfg(windows)]
@@ -70,6 +82,13 @@ mod texback;
 
 #[cfg(windows)]
 pub use host::on_failure;
+
+/// Frames the title has begun (its frame waits that ended), for logs.
+pub fn frames_begun() -> u64 {
+    frame::current()
+}
+#[cfg(windows)]
+pub use wc_back::title_memory_reserved;
 #[cfg(windows)]
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_view};
 #[cfg(windows)]
