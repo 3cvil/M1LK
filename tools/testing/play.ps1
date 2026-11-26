@@ -124,12 +124,14 @@ while (-not $script:p.HasExited) {
         Save-Shot "c$cycle-moved"
         Tap 'Esc' 'pause-menu'; Start-Sleep 3; Save-Shot "c$cycle-menu"
         Tap 'Down' 'menu-down'; Start-Sleep 1; Tap 'Down' 'menu-down'; Start-Sleep 1
-        Tap 'Right' 'menu-right'; Start-Sleep 2; Save-Shot "c$cycle-menu-nav"
+        Start-Sleep 2; Save-Shot "c$cycle-menu-nav"
         Tap 'Up' 'menu-up'; Start-Sleep 1; Tap 'Up' 'menu-up'
-        Tap 'Esc' 'menu-back'; Start-Sleep 2; Tap 'Esc' 'menu-close'; Start-Sleep 3
+        Tap 'Esc' 'menu-close'; Start-Sleep 3
         Save-Shot "c$cycle-closed"
         Tap 'F8' 'release-mouse'
     }
     while (((Get-Date) - $start).TotalSeconds -lt $Cycle -and -not $script:p.HasExited) { Start-Sleep 2 }
 }
+
+
 
