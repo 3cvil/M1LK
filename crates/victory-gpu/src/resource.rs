@@ -1263,6 +1263,26 @@ fn textures() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<usize
     TEXTURES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A title texture held alive ([`hold`]).
+#[cfg(windows)]
+pub(crate) struct Held(This);
+
+#[cfg(windows)]
+impl Drop for Held {
+    fn drop(&mut self) {
+        crate::object::release_boxed::<Resource>(self.0);
+    }
+}
+
+/// Holds title texture `this` alive, for work on a thread the title knows
+/// nothing of. `None` if it is no texture, or is being released.
+#[cfg(windows)]
+pub(crate) fn hold(this: This) -> Option<Held> {
+    // A texture leaves the table before it is freed, under this lock.
+    let all = textures();
+    (all.contains(&(this as usize)) && crate::object::add_ref_alive(this)).then(|| Held(this))
+}
+
 /// The title textures the host renders to or writes (targets, depth,
 /// unordered access), by the address of their memory: what a view the
 /// title places in that memory in another format shows ([`alias_of`]). A
@@ -2370,6 +2390,9 @@ pub(crate) fn compute_mip_drop(desc: &ResourceDesc) -> u32 {
         return 0;
     }
     let min_size = crate::texture::texture_mip_drop_min_size();
+    if keeps_ui_whole(desc) {
+        return 0;
+    }
     let n = compute_mip_drop_explicit(desc, drop, min_size);
     mip_drop_limits(
         desc,
@@ -2377,6 +2400,21 @@ pub(crate) fn compute_mip_drop(desc: &ResourceDesc) -> u32 {
         crate::texture::texture_mip_drop_floor(),
         crate::texture::texture_mip_cap(),
     )
+}
+
+/// Whether `desc` looks like 2D interface art (loading and menu pictures),
+/// which keeps all its levels: its chain stops short of a full one (world
+/// textures are authored with the whole chain down to 1x1; screen art is
+/// not). `VICTORY_TEXTURE_MIP_DROP_UI=1` drops such art as before.
+pub(crate) fn keeps_ui_whole(desc: &ResourceDesc) -> bool {
+    static DROP_UI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let drop_ui = *DROP_UI.get_or_init(|| std::env::var("VICTORY_TEXTURE_MIP_DROP_UI").is_ok_and(|v| v.trim() == "1"));
+    if drop_ui {
+        return false;
+    }
+    let side = desc.width.max(u64::from(desc.height)).max(1);
+    let full = 64 - side.leading_zeros();
+    mip_count(desc) < full
 }
 
 /// `n` levels to drop, held to a floor (the new top level at least that

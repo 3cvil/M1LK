@@ -3917,6 +3917,9 @@ fn join_copies() -> bool {
 /// Since the last frame-rate line: parallel batches and fills sent to them.
 #[cfg(feature = "diagnostics")]
 static FILL_BATCHES: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+/// Refreshes of copies told quiet from the journal (not run), since the last frame line.
+#[cfg(feature = "diagnostics")]
+static QUIET_REFRESHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Title buffer copies recorded and those that continue the previous copy.
 static COPIES_JOINED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 
@@ -5367,10 +5370,18 @@ impl Host {
     /// the air, at the next point where what they do can be observed
     /// ([`late`] lists those points); their host lists are reset and kept
     /// for reuse then, as a queue does for the lists it ran.
-    pub(crate) fn execute_late(&self, lists: Vec<crate::list::Detached>, mut order: Vec<usize>) {
+    pub(crate) fn execute_late(&self, mut lists: Vec<crate::list::Detached>, mut order: Vec<usize>) {
         if order.is_empty() {
             crate::list::recycle(lists, &order);
             return;
+        }
+        // Textures uploaded by the worker (`crate::heap_worker`): their lists
+        // run before the title's.
+        let ahead = crate::heap_worker::take_ready();
+        if !ahead.is_empty() {
+            let first = lists.len();
+            order.splice(0..0, first..first + ahead.len());
+            lists.extend(ahead.into_iter().map(crate::list::Detached::ours));
         }
         late_threads();
         let sent = {
@@ -7515,6 +7526,19 @@ impl Batch {
             crate::watch::ask_ahead(ranges);
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+        // Most of a flush's copies (the heap's buffer views: thousands a
+        // frame) were not written since they were taken: told so from the
+        // journal here, one lock and no allocation each, before any thread
+        // is woken for them. `VICTORY_QUIET_REFRESH=0` refreshes them all.
+        if crate::watch::quiet_refresh() && !self.refreshes.is_empty() {
+            let started = std::time::Instant::now();
+            #[cfg(feature = "diagnostics")]
+            let all = self.refreshes.len();
+            self.refreshes.retain(|(shadow, from, to)| !shadow.nothing_new(*from, *to - *from));
+            PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            #[cfg(feature = "diagnostics")]
+            QUIET_REFRESHES.fetch_add((all - self.refreshes.len()) as u64, Ordering::Relaxed);
+        }
         if wide_refresh() && self.refreshes.len() >= 4 {
             // Each copy on its own, several at a time: a copy's refresh
             // writes that copy and reads title memory, nothing of another's.
@@ -8139,6 +8163,15 @@ impl Meter {
             }
         }
         #[cfg(feature = "diagnostics")]
+        {
+            let quiet = QUIET_REFRESHES.swap(0, Ordering::Relaxed) as f64 / frames;
+            if quiet > 0.0 {
+                tracing::info!(
+                    "refreshes of copies told quiet from the journal per frame (VICTORY_QUIET_REFRESH=0 runs them): {quiet:.0}"
+                );
+            }
+        }
+        #[cfg(feature = "diagnostics")]
         if fill_workers() > 1 {
             let [batches, fills] = [0, 1].map(|i| FILL_BATCHES[i].swap(0, Ordering::Relaxed) as f64 / frames);
             tracing::info!("parallel upload preparation per frame: {batches:.1} batches, {fills:.0} fills");
@@ -8147,6 +8180,16 @@ impl Meter {
         let picked = crate::draw::HEAP_BUFFER_PASSES.swap(0, Ordering::Relaxed) as f64 / frames;
         let picked_ms =
             crate::draw::HEAP_BUFFER_MICROS.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames;
+        {
+            let [busy, lists] =
+                std::array::from_fn::<f64, 2, _>(|i| crate::heap_worker::STATS[i].swap(0, Ordering::Relaxed) as f64 / frames);
+            if busy > 0.0 {
+                tracing::info!(
+                    "textures picked by index, their own thread (VICTORY_HEAP_WORKER), per frame: {:.1} ms at work, {lists:.1} lists given to submissions",
+                    busy / 1e6
+                );
+            }
+        }
         // Copies between depth textures and their colour twins, each way.
         let [twin_to_depth, twin_to_colour] =
             [2, 3].map(|i| crate::resource::TWINS[i].swap(0, Ordering::Relaxed) as f64 / frames);

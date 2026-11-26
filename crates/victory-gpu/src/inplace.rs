@@ -298,6 +298,7 @@ fn views() -> std::sync::MutexGuard<'static, Views> {
 
 /// Identifies the mapping present when a readback was recorded. The title
 /// can reuse an address for new physical pages before a GPU fence signals.
+#[derive(Clone)]
 pub(crate) struct ReadbackMapping(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl ReadbackMapping {

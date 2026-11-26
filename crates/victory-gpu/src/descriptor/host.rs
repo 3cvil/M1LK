@@ -242,6 +242,11 @@ impl BufferRanges {
         self.slots.len()
     }
 
+    /// The slots that have a range now.
+    pub(crate) fn slot_ids(&self) -> Vec<u32> {
+        self.slots.keys().copied().collect()
+    }
+
     pub(crate) fn spans(&self) -> Vec<(Arc<crate::shadow::Shadow>, u64, u64)> {
         self.copies.values().filter_map(|(shadow, endpoints)| {
             let (from, to) = endpoints.bounds()?;

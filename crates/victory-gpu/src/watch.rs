@@ -308,6 +308,64 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
         .then(|| (j.ahead_asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()))
 }
 
+/// Whether `VICTORY_QUIET_REFRESH=0` is not set (on by default): a
+/// submission's refreshes of copies that nothing wrote to since they were
+/// taken are answered from the journal before any thread is woken or any
+/// buffer built for them ([`nothing_new`], `Shadow::nothing_new`).
+pub(crate) fn quiet_refresh() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_QUIET_REFRESH").is_none_or(|v| v != "0"))
+}
+
+/// Whether [`writes`] would answer for `[start, end)` that nothing was
+/// written which a copy with the notes `copied` (the asking after which each
+/// page from page `base` on was taken; 0: never) does not hold, and knows it
+/// without asking the kernel: the range lies in one asked ahead
+/// ([`ask_ahead`], [`ask_once`]), every page of it was taken whole, and no
+/// page was written after it was taken. `false` if anything would have to be
+/// asked or copied. Takes the journal's lock once, allocates nothing.
+pub(crate) fn nothing_new(start: usize, end: usize, base: usize, copied: &[u64]) -> bool {
+    let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+    let Some(taken) = first.checked_sub(base).and_then(|from| copied.get(from..last.checked_sub(base)?)) else {
+        return false;
+    };
+    quiet(&JOURNAL.lock().unwrap_or_else(|e| e.into_inner()), first, last, taken)
+}
+
+/// [`nothing_new`] of pages `[first, last)`, `taken[i]` the asking after
+/// which page `first + i` was copied.
+fn quiet(j: &Journal, first: usize, last: usize, taken: &[u64]) -> bool {
+    j.ahead.iter().any(|&(a, b)| a <= first && last <= b)
+        && taken.iter().all(|&at| at != 0)
+        && j.written.range(first..last).all(|(&page, &write)| write <= taken[page - first])
+}
+
+#[cfg(test)]
+mod quiet_tests {
+    use super::{Journal, quiet};
+
+    fn journal(ahead: &[(usize, usize)], written: &[(usize, u64)]) -> Journal {
+        Journal { ahead: ahead.to_vec(), written: written.iter().copied().collect(), ..super::EMPTY_JOURNAL }
+    }
+
+    #[test]
+    fn a_range_is_quiet_only_if_asked_taken_whole_and_not_written_since() {
+        // Pages 10..14 asked ahead; taken after askings 5, 5, 7, 7.
+        let taken = [5, 5, 7, 7];
+        // Nothing written since: quiet.
+        assert!(quiet(&journal(&[(0, 100)], &[(11, 5), (12, 7)]), 10, 14, &taken));
+        // A page written after it was taken: not quiet.
+        assert!(!quiet(&journal(&[(0, 100)], &[(11, 6)]), 10, 14, &taken));
+        // A write outside the range does not matter.
+        assert!(quiet(&journal(&[(0, 100)], &[(14, 99), (9, 99)]), 10, 14, &taken));
+        // A page never taken: not quiet.
+        assert!(!quiet(&journal(&[(0, 100)], &[]), 10, 14, &[5, 0, 7, 7]));
+        // Not asked ahead (or only partly): the kernel would have to be asked.
+        assert!(!quiet(&journal(&[], &[]), 10, 14, &taken));
+        assert!(!quiet(&journal(&[(0, 12)], &[]), 10, 14, &taken));
+    }
+}
+
 /// The pages of `[start, end)` (whole pages) as last written, for pages
 /// written since tracking began: `(page number, asking)` in page order, and
 /// this asking's number, which is higher than any in the list but those the

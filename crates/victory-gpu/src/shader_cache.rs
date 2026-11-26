@@ -83,6 +83,7 @@ fn build() -> &'static [u8; 32] {
             "VICTORY_WAVE_DEEP_SKIPS",
             "VICTORY_WAVE_OWN_BITS",
             "VICTORY_WAVE_LOCAL",
+            "VICTORY_WAVE_LDS_LOOSE",
             "VICTORY_LDS_FLAGS",
             "VICTORY_WAVE_ZERO_MASK",
             "VICTORY_BVH_MISS",

@@ -1131,6 +1131,13 @@ mod snapshot_pool_tests {
 
 const NOT_WATCHED: u8 = 2;
 
+/// Whether [`Shadow::refresh_check`] looks at refreshes (`VICTORY_REFRESH_CHECK=1`
+/// or the walls trace): then no refresh is skipped unlooked at.
+fn refresh_checking() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_REFRESH_CHECK").is_some_and(|v| v == "1") || crate::host::walls_trace())
+}
+
 /// Where `a` and `b` (of one length) first differ, compared eight bytes at
 /// a time.
 fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
@@ -2747,6 +2754,37 @@ impl Shadow {
         false
     }
 
+    /// Whether [`Shadow::update`] of `[address, address + len)` would copy
+    /// nothing, and is known to without asking the kernel anything
+    /// ([`crate::watch::nothing_new`]); `false` if it would have to ask or
+    /// copy. A refresh of such a copy has nothing to do but its counting.
+    pub(crate) fn nothing_new(&self, address: usize, len: usize) -> bool {
+        if self.place.is_some() {
+            return true;
+        }
+        let (start, end) = (self.start as usize, (self.start + self.len) as usize);
+        let (from, to) = (address.max(start), (address + len).min(end));
+        if from >= to {
+            return true;
+        }
+        if self.watched.load(Ordering::Relaxed) == NOT_WATCHED || refresh_checking() {
+            return false;
+        }
+        // Around ranges shaders are writing, the refresh goes gap by gap.
+        if self.pending.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(a, e)| a < to && e > from) {
+            return false;
+        }
+        let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        let same = crate::watch::nothing_new(from, to, start / PAGE, &copied);
+        #[cfg(feature = "diagnostics")]
+        if same {
+            use crate::copystat::{C, add};
+            add(C::Checked, (to - from) as u64);
+            add(C::Unchanged, (to - from) as u64);
+        }
+        same
+    }
+
     /// At submission: copies what changed of `[address, address + len)`
     /// since it was last copied (all of it if the memory is not
     /// write-watched). Returns the bytes copied.
@@ -2826,8 +2864,7 @@ impl Shadow {
     /// the copy and the address. One that differs once is a write of the
     /// title's that arrived between the refresh and the look.
     fn refresh_check(&self, from: usize, to: usize) {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if !*ON.get_or_init(|| std::env::var_os("VICTORY_REFRESH_CHECK").is_some_and(|v| v == "1") || crate::host::walls_trace()) {
+        if !refresh_checking() {
             return;
         }
         const SAMPLE: usize = 256;
