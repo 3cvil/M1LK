@@ -37,6 +37,15 @@
     <ellipse cx="256" cy="216" rx="96" ry="9" fill="#f8fbff"/>
   </g>
 
+  <!-- a few drops just above the surface -->
+  <g fill="#ffffff">
+    <circle cx="238" cy="196" r="6"/>
+    <circle cx="268" cy="184" r="4.5"/>
+    <circle cx="290" cy="200" r="3.5"/>
+    <circle cx="216" cy="190" r="3"/>
+    <circle cx="252" cy="172" r="2.5"/>
+  </g>
+
   <!-- glass -->
   <path d="M154 150 L358 150 L335 446 Q331 476 302 476 L210 476 Q181 476 177 446 Z"
         fill="url(#glass)" stroke="#cbd5e1" stroke-width="8" stroke-linejoin="round"/>
