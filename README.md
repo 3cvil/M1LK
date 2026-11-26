@@ -37,6 +37,7 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | 2026-11-26 | memory fix 1 | Series X, `--no-rt`, `VICTORY_TEXTURE_MIP_DROP=1` | Peak 17.2 GB, 5.9 GB of VRAM. Watchdog after 5 min 46 s with heavy paging. |
 | 2026-11-26 | RAM branch | Series X, `--no-rt`, window budget 1 GB, RAM trim 3 GB | Got further (10 min 19 s) but peaked at 20.0 GB, with 7.3 GB of VRAM. Duplicated texture copies (about 5 GB) and a window budget that did not hold were found. |
 | 2026-11-26 | RAM branch + pressure sweeps | Series X, `--no-rt`, mip drop 2 (textures of 512 px and up), window budget 1 GB, RAM trim 3 GB | **20 min with no crash** (the full test). Menus at 30 fps; in game a median of 0.5 fps, with frames spending 0.9 s (median) to 9.6 s (worst quarter) waiting on paging. Peak 21.6 GB, 6.8 GB of VRAM. The largest memory buckets were made shared buffers (8.1 GB), title window copies (5.2 GB) and host textures (5.0 GB). |
+| 2026-11-26 | merged build (all of today's work) | Series X, `--no-rt`, mip drop 2, window budget 1 GB, windows in Resizable BAR card memory, constants on the card, 2 MB sections; scripted keyboard and mouse play | **20 min with no crash, 5.6x faster:** median **2.8 fps** (was 0.5), worst quarter 1.1 fps (was 0.08). Paging stalls went from 80% of the median frame to none. Walking, sprinting, strafing, jumping, mouse look and the pause menu all respond. The top costs now are copy-back (170 ms) and buffer copies (100 ms). Peak commit 20.0 GB, working set 5.9 GB, 7.7 GB of VRAM. |
 
 This table is updated after every test run.
 
@@ -44,6 +45,7 @@ This table is updated after every test run.
 
 Newest first. Each bullet is a step that changed what M1LK does or what it measured.
 
+- **2026-11-26:** the merged build doubles as a real playtest. `tools/testing/play.ps1` drives real keyboard and mouse input: walk, sprint, strafe, jump, a 360° look, and the pause menu. It logs each step and screenshots the menus. The first 20-minute run: **2.8 fps median (was 0.5), 1.1 fps worst quarter (was 0.08)**, with no crash. All the controls work.
 - **2026-11-26:** merged all of today's work into one build:
   - RAM savers: windows in Resizable BAR card memory, constants on the card, 2 MB sections
   - DLSS Super Resolution
