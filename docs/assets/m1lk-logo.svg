@@ -52,14 +52,15 @@
 
   <!-- a few drops just above the surface -->
   <g fill="#ffffff">
-    <circle cx="184" cy="198" r="3.5"/>
-    <circle cx="206" cy="184" r="2.5"/>
-    <circle cx="226" cy="200" r="5"/>
-    <circle cx="252" cy="188" r="3"/>
-    <circle cx="276" cy="198" r="6"/>
-    <circle cx="298" cy="182" r="3"/>
-    <circle cx="318" cy="200" r="4"/>
-    <circle cx="334" cy="188" r="2.5"/>
+    <circle cx="182" cy="200" r="2"/>
+    <circle cx="200" cy="190" r="7.5"/>
+    <circle cx="224" cy="176" r="1.6"/>
+    <circle cx="238" cy="202" r="3.2"/>
+    <circle cx="262" cy="184" r="10"/>
+    <circle cx="286" cy="203" r="1.8"/>
+    <circle cx="300" cy="172" r="4.2"/>
+    <circle cx="318" cy="196" r="6"/>
+    <circle cx="338" cy="180" r="1.5"/>
   </g>
 
   <!-- glass -->
