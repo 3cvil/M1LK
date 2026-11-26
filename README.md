@@ -402,15 +402,93 @@ publish them.
 
 ### What we need help with most
 
-In priority order:
+In priority order (the [Progress](#progress) table has the latest numbers):
 
-1. **RAM use.** In Series X mode the runtime commits about 17 GB and pages heavily on 16 GB machines. We
-   need it under about 13 GB.
-2. **The safety watchdog crash during the title's first cutscene on low-RAM machines.**
-3. **Frame rate on 8 GB NVIDIA cards**, currently single digits to the low teens.
-4. **NVIDIA shader translation issues**: programs written for 64-lane waves running on 32-lane hardware
-   (wave32/wave64), and lane masks used as plain data.
-5. **Ray-tracing correctness on NVIDIA.**
+1. **Series S picture.** The Series S profile no longer crashes and runs faster (5.3 fps, 17.3 GB peak),
+   but the picture in game is black. The title presents in two planes (scene plus overlay) on Series S.
+2. **RAM use.** Peak commit is about 21 GB on Series X and 17 GB on Series S. The goal is 13 GB or less.
+3. **Frame rate on 8 GB NVIDIA cards.** The median is 3.5 fps on Series X with ray tracing off. The goal
+   is 30 fps that looks good (frame generation is fine, but report real fps next to it).
+4. **Load time.** It takes about 10 minutes to reach player control.
+5. **Ray tracing on NVIDIA** (wave32/wave64 shader translation, BVH builder).
+
+### Contributing with Claude Code (the fastest way to help)
+
+You can point [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), an AI coding agent
+that runs in your terminal, at this repository. It reads the README, the issues and the code, builds
+M1LK, and opens a pull request for you. You need a Claude subscription or an Anthropic API key.
+
+**1. Install the tools (once).** Open PowerShell:
+
+```powershell
+winget install Git.Git GitHub.cli Rustlang.Rustup
+irm https://claude.ai/install.ps1 | iex     # installs Claude Code
+gh auth login                               # lets Claude open the pull request from your account
+```
+
+Also install Visual Studio Build Tools with the "Desktop development with C++" workload (see
+[Requirements](#requirements)).
+
+**2. Fork and clone.** Click **Fork** at the top of this page, then:
+
+```powershell
+gh repo clone <your-user>/M1LK
+cd M1LK
+```
+
+Copy `bcpack-tables.bin` into `crates/victory-formats/src/` (see
+[Separately supplied data](#separately-supplied-data)), or the build fails.
+
+**3. Start Claude Code** in that folder:
+
+```powershell
+claude
+```
+
+**4. Paste this prompt.** Replace the two lines in angle brackets first. Everything else can stay as it
+is.
+
+```text
+You are contributing to M1LK (https://github.com/3cvil/M1LK), a Rust Xbox Series compatibility layer
+for Windows, tuned for low-end NVIDIA PCs (8 GB VRAM, 16 GB RAM). I have cloned my fork in this folder.
+
+My PC: <GPU and VRAM, CPU, RAM, Windows version>
+My focus (or "pick the top one"): <e.g. Series S black picture / RAM / frame rate / load time / ray tracing>
+
+Work in this order:
+1. Sources first. Read README.md fully (Progress, Test log, Changelog, "What we need help with most",
+   settings), docs/, and the open issues and pull requests on 3cvil/M1LK:
+   gh issue list -R 3cvil/M1LK ; gh pr list -R 3cvil/M1LK
+   Do not start work that an open pull request already covers.
+2. Pick ONE problem: my focus, or the highest item in "What we need help with most" that you can make
+   measurable progress on. Say in two lines what you picked and why before you write code.
+3. Find the cause in the code (crates/victory-gpu, victory-shader, victory-hle, victory-formats)
+   before you change anything. If another fork of VIctory already fixed it, port that fix and credit
+   it (license must be GPL-3.0-or-later compatible) instead of writing a new one.
+4. Make the smallest correct change. Put new behaviour behind a VICTORY_* environment switch when it
+   could change results on other hardware, and log once when it takes effect.
+5. Hard rules:
+   - Keep AMD paths working. Never remove or regress Radeon support; gate NVIDIA-only changes on what
+     the device reports (CheckFeatureSupport, vendor), not on assumptions.
+   - No game names, title files, keys, saves, screenshots or data derived from a title in code,
+     comments, tests, commits or the pull request. Say "the title".
+   - No new downloads, network calls, binaries, build.rs scripts or git dependencies.
+   - Never commit NVIDIA or other vendor binaries (for example DLSS DLLs).
+6. Verify: cargo fmt; cargo clippy --workspace --all-targets -- -D warnings; cargo test --workspace;
+   cargo build --release -p victory --bins. Add a unit test for the logic you changed.
+7. If I own the title and want to test in game, tell me the exact launch command and environment
+   variables, and what number or picture to compare before and after (frame time, committed memory,
+   VRAM). Wait for my results; never run the title yourself without asking me.
+8. Open one focused pull request to 3cvil/M1LK with gh pr create: what was wrong, what changed, which
+   switch controls it, test results, my hardware, and before/after numbers if I gave them. Remove user
+   names, paths, IP addresses and e-mail addresses from anything you paste.
+
+Keep me updated in short messages, and ask me only when a decision really needs me.
+```
+
+**5. Test it in game (optional but very useful).** If you own the title, follow
+[Step-by-step setup](#step-by-step-setup), run the launch command Claude gives you, and paste the
+numbers back. The HUD shows fps, draws and memory. Never share title files or game screenshots.
 
 ### Reporting a problem
 
