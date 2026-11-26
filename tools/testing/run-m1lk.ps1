@@ -48,7 +48,13 @@ $launch = [scriptblock]::Create("Start-Process '$Install\victory-play.exe' -Argu
 Get-Process victory, victory-play -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep 8
 $watch, $play | Where-Object { $_ } | Stop-Process -ErrorAction SilentlyContinue; $gpu | Stop-Process -ErrorAction SilentlyContinue; $ka | Stop-Process -ErrorAction SilentlyContinue
-Get-ChildItem "$Install\logs" -Filter 'run-*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Copy-Item -Destination $out
+# the log can still be flushing after the kill: retry until the copy has content
+$srcLog = Get-ChildItem "$Install\logs" -Filter 'run-*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+for ($i = 0; $srcLog -and $i -lt 6; $i++) {
+    Copy-Item $srcLog.FullName -Destination $out -Force
+    if ((Get-Item (Join-Path $out $srcLog.Name)).Length -gt 0) { break }
+    Start-Sleep 5
+}
 Get-ChildItem "$Install\state" -Recurse -Filter '*.crash.log' -ErrorAction SilentlyContinue | Where-Object LastWriteTime -gt $t0 | Copy-Item -Destination $out
 $runLog = Get-ChildItem $out -Filter 'run-*.log' | Select-Object -First 1
 $samples = Get-ChildItem (Join-Path $tools '..\probe-results') -Directory -Filter "$Name-2*" | Sort-Object Name -Descending | Select-Object -First 1

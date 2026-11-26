@@ -770,7 +770,7 @@ impl State {
                 // null view to stand for it and is left out, as before.
                 let null = record
                     .desc()
-                    .filter(|d| d.Format.0 != 0 && d.ViewDimension.0 != 0);
+                    .filter(|d| d.Format.0 != 0 && d.ViewDimension.0 != 0 && crate::resource::renders_to(d.Format.0 as u32));
                 if let Some(desc) = null {
                     rtvs.push(host.rtv(None, Some(&desc)));
                 }

@@ -255,45 +255,101 @@ pub(crate) fn pc_format(format: u32) -> u32 {
 /// itself in the 16-bit format are skipped ([`stands_in`]); convert them
 /// if a pass turns out to need one.
 pub(crate) fn target_format(format: u32) -> u32 {
-    const STAND_INS: [(u32, u32); 2] = [(86, 28), (115, 28)];
+    /// A title format, and the formats of the same texel size (then a
+    /// wider one) that stand in for it, best first.
+    /// R9G9B9E5 (67) is never a render target or unordered access format
+    /// on D3D12; the title asks for both in the Series S profile
+    /// (`VICTORY_RGB9E5_HOST=0`: left as asked). R11G11B10_FLOAT has the
+    /// same 32 bits per texel (footprints and sizes stay the title's), the
+    /// 16-bit float RGBA is the wider fallback. Neither keeps the shared
+    /// exponent's bits: a copy between such a target and title memory is
+    /// skipped ([`stands_in`]), the texture is GPU-only.
+    const STAND_INS: [(u32, &[u32]); 3] = [(86, &[28]), (115, &[28]), (67, &[26, 10])];
     let Some(i) = STAND_INS.iter().position(|&(f, _)| f == format) else {
         return format;
     };
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Direct3D12::*;
-        static REFUSED: std::sync::OnceLock<[bool; 2]> = std::sync::OnceLock::new();
-        let refused = REFUSED.get_or_init(|| {
-            STAND_INS.map(|(f, _)| {
+        static CHOSEN: std::sync::OnceLock<[u32; 3]> = std::sync::OnceLock::new();
+        let chosen = CHOSEN.get_or_init(|| {
+            STAND_INS.map(|(f, candidates)| {
+                if f == 67 && std::env::var("VICTORY_RGB9E5_HOST").is_ok_and(|v| v.trim() == "0") {
+                    return f;
+                }
                 let Some(host) = crate::host::host() else {
-                    return false;
+                    return f;
                 };
-                let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
-                    Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(f as i32),
-                    ..Default::default()
-                };
-                // SAFETY: a plain query into our own structure.
-                let asked = unsafe {
-                    host.device.CheckFeatureSupport(
-                        D3D12_FEATURE_FORMAT_SUPPORT,
-                        (&raw mut support).cast(),
-                        size_of_val(&support) as u32,
-                    )
+                // (Support1, Support2) of a format; `None` if the query fails.
+                let query = |format: u32| {
+                    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+                        Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(format as i32),
+                        ..Default::default()
+                    };
+                    // SAFETY: a plain query into our own structure.
+                    let asked = unsafe {
+                        host.device.CheckFeatureSupport(
+                            D3D12_FEATURE_FORMAT_SUPPORT,
+                            (&raw mut support).cast(),
+                            size_of_val(&support) as u32,
+                        )
+                    };
+                    asked.is_ok().then_some((support.Support1.0, support.Support2.0))
                 };
                 let both = D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0
                     | D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0;
-                let refused = asked.is_err() || support.Support1.0 & both != both;
+                let refused = query(f).is_none_or(|(s1, _)| s1 & both != both);
+                let store = D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE.0;
+                let chosen = stand_in(f, refused, candidates, |c| {
+                    query(c).is_some_and(|(s1, s2)| s1 & both == both && s2 & store == store)
+                });
                 if refused {
-                    tracing::info!(format = f, "the host does not render to this format: 8-bit RGBA stands in");
+                    tracing::info!(format = f, stand_in = chosen, "the host does not render to this format: a stand-in format is used");
                 }
-                refused
+                chosen
             })
         });
-        if refused[i] {
-            return STAND_INS[i].1;
-        }
+        return chosen[i];
     }
+    #[cfg(not(windows))]
     format
+}
+
+/// The format that stands in for `format` when the host `refused` it:
+/// the first of `candidates` the host `supports`, else `format` itself.
+pub(crate) fn stand_in(format: u32, refused: bool, candidates: &[u32], supports: impl Fn(u32) -> bool) -> u32 {
+    if !refused {
+        return format;
+    }
+    candidates.iter().copied().find(|&c| supports(c)).unwrap_or(format)
+}
+
+/// Whether the host can render to `format` (an unknown one: no).
+#[cfg(windows)]
+pub(crate) fn renders_to(format: u32) -> bool {
+    use windows::Win32::Graphics::Direct3D12::*;
+    static CACHE: std::sync::Mutex<Vec<(u32, bool)>> = std::sync::Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(_, yes)) = cache.iter().find(|&&(f, _)| f == format) {
+        return yes;
+    }
+    let yes = crate::host::host().is_some_and(|host| {
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(format as i32),
+            ..Default::default()
+        };
+        // SAFETY: a plain query into our own structure.
+        let asked = unsafe {
+            host.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of_val(&support) as u32,
+            )
+        };
+        asked.is_ok() && support.Support1.0 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 != 0
+    });
+    cache.push((format, yes));
+    yes
 }
 
 /// Whether the host copy of the title texture `this` is in a stand-in
@@ -3225,6 +3281,20 @@ static RESOURCE_FUNCTIONS: Table<32> = {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shared_exponent_targets_take_a_same_size_stand_in() {
+        // Supported by the host: untouched (hardware that renders to it).
+        assert_eq!(stand_in(67, false, &[26, 10], |_| true), 67);
+        // Refused: R11G11B10 (same 32 bits) first, 16-bit float RGBA second.
+        assert_eq!(stand_in(67, true, &[26, 10], |_| true), 26);
+        assert_eq!(stand_in(67, true, &[26, 10], |c| c == 10), 10);
+        assert_eq!(element(26), element(67));
+        // Nothing fits: left as asked (the draw is dropped, not the device).
+        assert_eq!(stand_in(67, true, &[26, 10], |_| false), 67);
+        // Other formats are never remapped.
+        assert_eq!(target_format(42), 42);
+    }
     use super::*;
     use crate::object::slot;
 
