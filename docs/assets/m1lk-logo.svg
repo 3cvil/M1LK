@@ -1,72 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="M1LK logo: a glass of frothy milk">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="M1LK logo: a milk splash in a glass">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0b1222"/>
       <stop offset="0.55" stop-color="#16243f"/>
       <stop offset="1" stop-color="#25406b"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.55">
-      <stop offset="0" stop-color="#3b6fb5" stop-opacity="0.35"/>
+    <radialGradient id="glow" cx="0.5" cy="0.38" r="0.55">
+      <stop offset="0" stop-color="#3b6fb5" stop-opacity="0.4"/>
       <stop offset="1" stop-color="#3b6fb5" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="glass" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#e2e8f0" stop-opacity="0.35"/>
-      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.06"/>
       <stop offset="1" stop-color="#e2e8f0" stop-opacity="0.3"/>
     </linearGradient>
     <linearGradient id="milk" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#eef3f8"/>
+      <stop offset="0" stop-color="#e8eef5"/>
       <stop offset="0.45" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#d9e2ec"/>
+      <stop offset="1" stop-color="#d6dfea"/>
     </linearGradient>
-    <radialGradient id="bubble" cx="0.38" cy="0.35" r="0.7">
+    <linearGradient id="splash" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="0.75" stop-color="#f3f6fa"/>
-      <stop offset="1" stop-color="#dfe6ee"/>
-    </radialGradient>
+      <stop offset="1" stop-color="#e4ebf3"/>
+    </linearGradient>
     <clipPath id="inside">
-      <path d="M161 136 L351 136 L329 424 Q326 448 302 448 L210 448 Q186 448 183 424 Z"/>
+      <path d="M161 190 L351 190 L329 444 Q326 468 302 468 L210 468 Q186 468 183 444 Z"/>
     </clipPath>
   </defs>
 
   <rect width="512" height="512" rx="96" fill="url(#bg)"/>
   <rect width="512" height="512" rx="96" fill="url(#glow)"/>
 
-  <g transform="translate(0 24)">
   <!-- milk -->
   <g clip-path="url(#inside)">
-    <rect x="150" y="200" width="220" height="260" fill="url(#milk)"/>
+    <rect x="150" y="196" width="220" height="280" fill="url(#milk)"/>
   </g>
 
-  <!-- froth: a dome of bubbles spilling just over the rim -->
-  <g fill="url(#bubble)" stroke="#d5dde7" stroke-width="2">
-    <circle cx="176" cy="160" r="26"/>
-    <circle cx="336" cy="160" r="26"/>
-    <circle cx="214" cy="142" r="32"/>
-    <circle cx="298" cy="142" r="32"/>
-    <circle cx="256" cy="128" r="38"/>
-    <circle cx="232" cy="104" r="24"/>
-    <circle cx="282" cy="100" r="26"/>
-    <circle cx="258" cy="80" r="18"/>
-    <rect x="160" y="160" width="192" height="44" stroke="none"/>
+  <!-- crown splash rising out of the milk -->
+  <path d="M160 200
+           C176 192 184 170 180 138
+           Q190 166 204 172
+           C210 150 210 122 214 104
+           Q222 140 234 160
+           C240 128 248 98 256 82
+           C264 98 272 128 278 160
+           Q290 140 298 104
+           C302 122 302 150 308 172
+           Q322 166 332 138
+           C328 170 336 192 352 200
+           Q256 220 160 200 Z"
+        fill="url(#splash)" stroke="url(#splash)" stroke-width="6" stroke-linejoin="round"/>
+  <!-- droplets thrown off the crown -->
+  <g fill="#ffffff">
+    <circle cx="180" cy="120" r="9"/>
+    <circle cx="214" cy="86" r="10"/>
+    <circle cx="256" cy="60" r="12"/>
+    <circle cx="298" cy="86" r="10"/>
+    <circle cx="332" cy="120" r="9"/>
+    <circle cx="146" cy="134" r="5"/>
+    <circle cx="366" cy="134" r="5"/>
+    <circle cx="232" cy="52" r="5"/>
+    <circle cx="282" cy="46" r="4"/>
+    <circle cx="196" cy="70" r="4"/>
+    <circle cx="318" cy="72" r="4"/>
   </g>
-  <!-- froth texture: small bubbles -->
-  <g fill="none" stroke="#cdd6e1" stroke-width="2.5">
-    <circle cx="200" cy="178" r="6"/>
-    <circle cx="228" cy="186" r="4"/>
-    <circle cx="270" cy="176" r="7"/>
-    <circle cx="306" cy="188" r="4"/>
-    <circle cx="322" cy="174" r="5"/>
-    <circle cx="246" cy="152" r="5"/>
-    <circle cx="288" cy="132" r="4"/>
-    <circle cx="224" cy="128" r="4"/>
-  </g>
-  <!-- foam edge settling into the milk -->
-  <path d="M166 202 Q190 214 214 204 Q238 216 262 205 Q286 216 310 204 Q332 214 348 202 L348 196 L166 196 Z" fill="#ffffff"/>
 
   <!-- glass -->
-  <path d="M154 130 L358 130 L335 426 Q331 456 302 456 L210 456 Q181 456 177 426 Z"
+  <path d="M154 150 L358 150 L335 446 Q331 476 302 476 L210 476 Q181 476 177 446 Z"
         fill="url(#glass)" stroke="#cbd5e1" stroke-width="8" stroke-linejoin="round"/>
-  <path d="M182 160 L200 420" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity="0.35"/>
-  </g>
+  <path d="M182 214 L198 440" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity="0.35"/>
 </svg>
