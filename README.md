@@ -40,6 +40,27 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 
 This table is updated after every test run.
 
+## Changelog
+
+Newest first. Each bullet is a step that changed what M1LK does or what it measured.
+
+- **2026-11-26:** merged all of today's work into one build:
+  - RAM savers: windows in Resizable BAR card memory, constants on the card, 2 MB sections
+  - DLSS Super Resolution
+  - P-core/E-core thread placement
+  - high-performance GPU pick on Optimus laptops
+  - frame interval and render scale
+  - the watchdog switch (on by default)
+  - write-combined copy-back skip
+  - ApexIV correctness fixes
+  - faster shader warm with a pipeline book
+
+  The first run of the merged build shows about 1.8 fps early on, against a 0.5 fps median before.
+- **2026-11-26:** Series S profile tested: about 11 GB of RAM before the scene loads, but the device is removed on the first real scene. Being debugged.
+- **2026-11-26:** first full 20-minute run with no crash (the record before was 10 min 19 s). Memory-pressure sweeps added.
+- **2026-11-26:** testing tools added: playtest runner, frame-time and memory breakdown, charts, and per-second GPU clock, temperature and power logging.
+- **2026-11-26:** M1LK created from VIctory and the DexNom fork. Setup script, warm shortcut, keyboard and mouse controls, M1LK HUD.
+
 ## What's in M1LK (26 Nov 2026)
 
 Everything here is opt-in unless marked as a default, so the upstream (including AMD) behaviour is unchanged.
