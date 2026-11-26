@@ -38,31 +38,25 @@
 
   <!-- crown splash rising out of the milk -->
   <path d="M160 200
-           C176 192 184 170 180 138
-           Q190 166 204 172
-           C210 150 210 122 214 104
-           Q222 140 234 160
-           C240 128 248 98 256 82
-           C264 98 272 128 278 160
-           Q290 140 298 104
-           C302 122 302 150 308 172
-           Q322 166 332 138
-           C328 170 336 192 352 200
-           Q256 220 160 200 Z"
-        fill="url(#splash)" stroke="url(#splash)" stroke-width="6" stroke-linejoin="round"/>
-  <!-- droplets thrown off the crown -->
+           C180 196 190 186 190 170
+           Q200 184 212 186
+           C216 172 218 156 222 146
+           Q228 166 238 178
+           C244 160 250 138 256 126
+           C262 138 268 160 274 178
+           Q284 166 290 146
+           C294 156 296 172 300 186
+           Q312 184 322 170
+           C322 186 332 196 352 200
+           Q256 214 160 200 Z"
+        fill="url(#splash)" stroke="url(#splash)" stroke-width="4" stroke-linejoin="round"/>
+  <!-- a few droplets -->
   <g fill="#ffffff">
-    <circle cx="180" cy="120" r="9"/>
-    <circle cx="214" cy="86" r="10"/>
-    <circle cx="256" cy="60" r="12"/>
-    <circle cx="298" cy="86" r="10"/>
-    <circle cx="332" cy="120" r="9"/>
-    <circle cx="146" cy="134" r="5"/>
-    <circle cx="366" cy="134" r="5"/>
-    <circle cx="232" cy="52" r="5"/>
-    <circle cx="282" cy="46" r="4"/>
-    <circle cx="196" cy="70" r="4"/>
-    <circle cx="318" cy="72" r="4"/>
+    <circle cx="256" cy="110" r="7"/>
+    <circle cx="222" cy="132" r="5"/>
+    <circle cx="290" cy="132" r="5"/>
+    <circle cx="240" cy="98" r="3"/>
+    <circle cx="274" cy="96" r="3"/>
   </g>
 
   <!-- glass -->
