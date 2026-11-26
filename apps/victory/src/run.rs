@@ -11,6 +11,12 @@ mod native_1440p;
 #[path = "fsr_preset.rs"]
 mod fsr_preset;
 
+/// The host upscaler a console profile needs when `VICTORY_UPSCALER` is unset.
+#[cfg(windows)]
+fn default_upscaler(console: Console, chosen: bool) -> Option<&'static str> {
+    (matches!(console, Console::SeriesS) && !chosen).then_some("spatial")
+}
+
 #[cfg(windows)]
 pub fn run(
     exe: &Path,
@@ -28,6 +34,14 @@ pub fn run(
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;
     rays.apply(&cfg);
+    // Series S titles upscale with the console's FSR4 compute passes, which
+    // ship as machine code the host cannot translate (their pipelines are
+    // dropped and the output stays black); serve the upscaler on the host.
+    if let Some(name) = default_upscaler(console, std::env::var_os("VICTORY_UPSCALER").is_some()) {
+        // SAFETY: Windows supports setting the environment across threads;
+        // the title and the HLE registry have not started yet.
+        unsafe { std::env::set_var("VICTORY_UPSCALER", name) };
+    }
     use fsr_preset::FsrPreset;
     let fsr = match std::env::var("VICTORY_FSR_4K").as_deref() {
         Ok("0") => None,
@@ -406,6 +420,15 @@ impl LoaderLock {
 #[cfg(all(test, windows))]
 mod tests {
     use std::sync::{Arc, Mutex};
+
+    use crate::Console;
+
+    #[test]
+    fn series_s_defaults_to_the_host_upscaler() {
+        assert_eq!(super::default_upscaler(Console::SeriesS, false), Some("spatial"));
+        assert_eq!(super::default_upscaler(Console::SeriesS, true), None);
+        assert_eq!(super::default_upscaler(Console::SeriesX, false), None);
+    }
 
     #[test]
     fn loader_lock_is_reentrant_and_exclusive() {

@@ -1403,19 +1403,92 @@ pub(crate) fn alias_of(this: This) -> Option<This> {
     }
     // Under the table's lock: a texture leaves it before it is freed.
     let targets = TARGETS_AT.lock().unwrap_or_else(|e| e.into_inner());
-    let other = *targets.get(&(r.data() as u64))?.last()? as This;
-    let o = resource(other);
+    // Several textures can lie at one address (the title's own, and the
+    // ones its placed views made): the newest that holds the bits.
+    targets
+        .get(&(r.data() as u64))?
+        .iter()
+        .rev()
+        .map(|&o| o as This)
+        .find(|&o| holds_bits_of(&r.desc, &resource(o).desc, one))
+}
+
+/// Whether a texture of description `o`, which the host writes, holds the
+/// texels a placed view of description `r` reads, bit for bit: the same
+/// size, levels and layers, colour of the same texel width, and not a
+/// stand-in target ([`target_format`]: its texels are not the title's).
+#[cfg(windows)]
+fn holds_bits_of(r: &ResourceDesc, o: &ResourceDesc, one: impl Fn(&ResourceDesc) -> bool) -> bool {
     const DEPTH: u32 = 0x2;
-    let same = one(&o.desc)
-        && o.desc.dimension == r.desc.dimension
-        && o.desc.width == r.desc.width
-        && o.desc.height == r.desc.height
-        && o.desc.mip_levels == r.desc.mip_levels
-        && o.desc.depth_or_array_size == r.desc.depth_or_array_size
-        && o.desc.flags & DEPTH == 0
-        && target_format(o.desc.format) == o.desc.format
-        && element(o.desc.format).is_some_and(|e| e.1 == 1 && Some(e) == element(r.desc.format));
-    same.then_some(other)
+    one(o)
+        && o.dimension == r.dimension
+        && o.width == r.width
+        && o.height == r.height
+        && o.mip_levels == r.mip_levels
+        && o.depth_or_array_size == r.depth_or_array_size
+        && o.flags & DEPTH == 0
+        && target_format(o.format) == o.format
+        && element(o.format).is_some_and(|e| e.1 == 1 && Some(e) == element(r.format))
+}
+
+/// Whether views of the shared-exponent stand-in are matched with their
+/// placed views (`VICTORY_RGB9E5_VIEWS=0`: not, as before).
+#[cfg(windows)]
+fn stand_in_views() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_RGB9E5_VIEWS").is_err_and(|e| matches!(e, std::env::VarError::NotPresent)) || std::env::var("VICTORY_RGB9E5_VIEWS").is_ok_and(|v| v.trim() != "0"))
+}
+
+/// Whether a view placed over a texture of description `r` (read-only: no
+/// target or unordered access flag) names the title's own texture of
+/// description `o`, which the host holds in a stand-in format
+/// ([`target_format`]; `standing` says whether `o` is): the same format,
+/// size, levels and layers, and a texture shaders or targets write.
+/// Such a view is of that texture itself, in the stand-in: the placed
+/// texture filled from title memory would never see what the host wrote,
+/// and was black (the shared-exponent light buffer of the Series S
+/// profile).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_stand_in_of(r: &ResourceDesc, o: &ResourceDesc, standing: bool) -> bool {
+    const TARGET_UNORDERED: u32 = 0x1 | 0x4;
+    standing
+        && o.flags & TARGET_UNORDERED != 0
+        && o.flags & 0x2 == 0
+        && o.format == r.format
+        && o.dimension == r.dimension
+        && o.width == r.width
+        && o.height == r.height
+        && o.mip_levels == r.mip_levels
+        && o.depth_or_array_size == r.depth_or_array_size
+        && o.sample_count <= 1
+}
+
+/// For a read-only view the title places at `address` over a texture of
+/// description `words` (a [`texture_at`] description): the title's own
+/// texture there if the host holds it in a stand-in format, and no other
+/// texture at that address holds the view's bits for a copy
+/// ([`alias_of`]: a bit-for-bit writer is the better source).
+#[cfg(windows)]
+pub(crate) fn stand_in_at(address: u64, words: &[u32; 14]) -> Option<ResourceRef> {
+    if address == 0 || !stand_in_views() {
+        return None;
+    }
+    // SAFETY: 56 bytes with the title resource description's layout.
+    let desc = unsafe { words.as_ptr().cast::<ResourceDesc>().read_unaligned() };
+    if desc.dimension == BUFFER || desc.flags & 0x7 != 0 || target_format(pc_format(desc.format)) == pc_format(desc.format) {
+        return None;
+    }
+    let targets = TARGETS_AT.lock().unwrap_or_else(|e| e.into_inner());
+    let owners = targets.get(&address)?;
+    let one = |d: &ResourceDesc| d.dimension != BUFFER && d.sample_count <= 1;
+    if owners.iter().any(|&o| holds_bits_of(&desc, &resource(o as This).desc, one)) {
+        return None;
+    }
+    let owner = owners.iter().rev().copied().find(|&o| {
+        let d = resource(o as This).desc;
+        is_stand_in_of(&desc, &d, target_format(pc_format(d.format)) != pc_format(d.format))
+    })?;
+    object::try_add_ref(owner as This).then(|| ResourceRef(owner))
 }
 
 /// Whether host copies are made on first use. On by default;
@@ -2223,6 +2296,14 @@ pub(crate) fn host_resource<'a>(
     // list and no slot holds and that nothing asked for in seconds (the
     // asking just made is noted under the same lock).
     Some(unsafe { &*std::ptr::from_ref(&host.texture) })
+}
+
+/// Whether `this` is a valid title resource created by this runtime.
+#[cfg(windows)]
+pub(crate) fn is_resource(this: This) -> bool {
+    let mut table = [0; size_of::<usize>()];
+    crate::host::read_into(this.cast(), &mut table)
+        && usize::from_ne_bytes(table) == RESOURCE_FUNCTIONS.0.as_ptr() as usize
 }
 
 /// A title texture's host copy, shared, for a list to hold.
@@ -3297,6 +3378,51 @@ mod tests {
     }
     use super::*;
     use crate::object::slot;
+
+    fn tex(format: u32, flags: u32) -> ResourceDesc {
+        ResourceDesc {
+            dimension: 3,
+            alignment: 0,
+            width: 1920,
+            height: 1080,
+            depth_or_array_size: 1,
+            mip_levels: 1,
+            format,
+            sample_count: 1,
+            sample_quality: 0,
+            layout: 0,
+            flags,
+        }
+    }
+
+    #[test]
+    fn a_placed_view_of_a_stand_in_target_is_that_target() {
+        let placed = tex(67, 0);
+        // The title's light buffer: shared exponent, target and unordered
+        // access, held as a stand-in by the host.
+        assert!(is_stand_in_of(&placed, &tex(67, 0x5), true));
+        // Not held as a stand-in (the host renders to it): the old path.
+        assert!(!is_stand_in_of(&placed, &tex(67, 0x5), false));
+        // Another size, another format, or one the shaders never write.
+        assert!(!is_stand_in_of(&placed, &ResourceDesc { width: 1280, ..tex(67, 0x5) }, true));
+        assert!(!is_stand_in_of(&placed, &tex(42, 0x5), true));
+        assert!(!is_stand_in_of(&placed, &tex(67, 0), true));
+        // A depth texture is never the one.
+        assert!(!is_stand_in_of(&placed, &tex(67, 0x7), true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bit_writer_is_found_past_a_stand_in_at_the_same_address() {
+        let one = |_: &ResourceDesc| true;
+        let read = tex(67, 0);
+        // R32_UINT written by compute shaders: the bits R9G9B9E5 reads.
+        assert!(holds_bits_of(&read, &tex(42, 0x4), one));
+        // Another texel width, size or a depth texture: not.
+        assert!(!holds_bits_of(&read, &ResourceDesc { height: 540, ..tex(42, 0x4) }, one));
+        assert!(!holds_bits_of(&read, &tex(42, 0x6), one));
+        assert!(!holds_bits_of(&read, &tex(42, 0x4), |_| false));
+    }
 
     type Release = extern "system" fn(This) -> u32;
     type Map = extern "system" fn(This, u32, *const c_void, *mut *mut u8) -> HRESULT;

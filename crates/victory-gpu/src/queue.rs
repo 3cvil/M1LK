@@ -593,6 +593,44 @@ pub(crate) struct Plane {
     count: u32,
     resources: *const This,
 }
+/// Retail PresentX adds source-rectangle and destination pointers, a color
+/// space and seven option words after the common prefix. Older callers pass
+/// only the prefix for single-plane presents.
+#[cfg(windows)]
+#[repr(C)]
+struct RetailPlane {
+    prefix: Plane,
+    source_rects: *const (),
+    destination: *const (),
+    color_space: u32,
+    options: [u32; 7],
+}
+#[cfg(windows)]
+const _: () = assert!(size_of::<RetailPlane>() == 72);
+
+/// The second plane's first resource, when the present carries one and it
+/// is a resource of ours.
+#[cfg(windows)]
+fn overlay_resource(parameters: *const Plane) -> Option<This> {
+    // Read only the second prefix at the 72-byte retail PresentX stride. A
+    // caller using a different layout can still present its base plane safely.
+    let second = parameters.cast::<RetailPlane>().wrapping_add(1).cast::<u8>();
+    let mut prefix = [0; size_of::<Plane>()];
+    if !crate::host::read_into(second, &mut prefix) {
+        return None;
+    }
+    // SAFETY: the prefix has the C layout above and its bytes were copied.
+    let plane = unsafe { prefix.as_ptr().cast::<Plane>().read_unaligned() };
+    let mut pointer = [0; size_of::<This>()];
+    if plane.count == 0
+        || plane.resources.is_null()
+        || !crate::host::read_into(plane.resources.cast(), &mut pointer)
+    {
+        return None;
+    }
+    let resource = usize::from_ne_bytes(pointer) as This;
+    crate::resource::is_resource(resource).then_some(resource)
+}
 /// Submission tagged with the frame it belongs to `(count, lists, frame
 /// token, flags)`; frames are paced elsewhere, so it runs as a plain one.
 extern "system" fn execute_x(this: This, count: u32, lists: *const This, _token: u64, _flags: u32) {
@@ -845,7 +883,22 @@ extern "system" fn present(
         const COPY_SOURCE: u32 = 0x800;
         let state = crate::resource::host_transition(resource, COPY_SOURCE)
             .map_or(COPY_SOURCE, |(_, before)| before);
-        let shown = host.present(texture, state, frame);
+        // The interface plane (Series S), laid over the first when both are
+        // ours; its state is put back once shown.
+        let second = (planes > 1 && crate::compose::on())
+            .then(|| overlay_resource(plane_parameters))
+            .flatten()
+            .filter(|&over| over != resource)
+            .and_then(|over| {
+                let tex = crate::resource::host_resource(over)?;
+                let before = crate::resource::host_transition(over, COPY_SOURCE)
+                    .map_or(COPY_SOURCE, |(_, before)| before);
+                Some((over, tex, before))
+            });
+        let shown = host.present_planes(texture, state, second.map(|(_, t, b)| (t, b)), frame);
+        if let Some((over, _, before)) = second {
+            crate::resource::host_transition(over, before);
+        }
         crate::resource::host_transition(resource, state);
         #[cfg(feature = "diagnostics")]
         blinks(frame, resource, state, shown);

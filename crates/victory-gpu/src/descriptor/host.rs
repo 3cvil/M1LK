@@ -978,7 +978,7 @@ fn dynamic_slots(null: u32) -> u32 {
         let asked = std::env::var("VICTORY_DYNAMIC_SLOTS")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok());
-        let slots = asked.unwrap_or(DYNAMIC).clamp(DYNAMIC, (null / 2).max(DYNAMIC));
+        let slots = capped_dynamic(null, asked);
         if slots != DYNAMIC {
             tracing::warn!(
                 slots,
@@ -988,6 +988,28 @@ fn dynamic_slots(null: u32) -> u32 {
         }
         slots
     })
+}
+
+/// The title slots seen in use on a capped host (the highest was about
+/// 720,000): a layout that keeps fewer in place makes those views read the
+/// null slot (a black or broken picture), so it is reported.
+const TITLE_SLOTS_IN_USE: u32 = 737_855;
+
+/// The dynamic slots asked for (`VICTORY_DYNAMIC_SLOTS`) on a capped heap
+/// whose null slot is `null`, kept between [`DYNAMIC`] and half the heap.
+fn capped_dynamic(null: u32, asked: Option<u32>) -> u32 {
+    asked.unwrap_or(DYNAMIC).clamp(DYNAMIC, (null / 2).max(DYNAMIC))
+}
+
+/// The layout of a view heap, from the title's count, the null slot (0: no
+/// limit) and the dynamic slots: `(title slots kept in place, heap size)`.
+/// Title slots past what is kept read the null slot.
+fn view_layout(count: u32, null: u32, extra: u32) -> (u32, u32) {
+    if null == 0 {
+        (count, count + extra)
+    } else {
+        (count.min(null.saturating_sub(extra)), null + 1)
+    }
 }
 
 impl HostHeap {
@@ -1022,30 +1044,38 @@ impl HostHeap {
             victory_shader::emit::view_heap_limit()
         };
         let extra = if sampler { 0 } else { dynamic_slots(null) };
-        let (heap, count, size) = if null == 0 {
-            match make(count + extra) {
-                Ok(heap) => (heap, count, count + extra),
-                Err(e) => {
-                    tracing::warn!(error = %e, count, sampler, "no host descriptor heap");
-                    return None;
+        let (kept_in_place, size) = view_layout(count, null, extra);
+        if null != 0 && !sampler {
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| {
+                let (title, dynamic) = (kept_in_place, null - kept_in_place);
+                if kept_in_place < count {
+                    // shortcut: descriptors past the host's limit are left out; a title that
+                    // reaches them needs remapping. They read the null slot instead.
+                    tracing::warn!(
+                        count,
+                        size,
+                        title,
+                        dynamic,
+                        "host view heap capped at {size}; title views past slot {title} read a null slot"
+                    );
+                    if title < TITLE_SLOTS_IN_USE {
+                        tracing::warn!(
+                            title,
+                            in_use = TITLE_SLOTS_IN_USE,
+                            "fewer title view slots kept than seen in use: views past them read a null slot (VICTORY_DYNAMIC_SLOTS too high?)"
+                        );
+                    }
                 }
-            }
-        } else {
-            let size = null + 1;
-            let fitted = if count <= null - extra {
-                count
-            } else {
-                // shortcut: descriptors past the host's limit are left out; a title that reaches
-                // them needs remapping. They read the null slot instead.
-                tracing::warn!(count, "host view heap capped at {size}; views past it read a null slot");
-                null - extra
-            };
-            match make(size) {
-                Ok(heap) => (heap, fitted, size),
-                Err(e) => {
-                    tracing::warn!(error = %e, count, size, "no host view heap");
-                    return None;
-                }
+                tracing::info!(count, size, title, dynamic, "host view heap layout: title slots, then dynamic slots, then the null slot");
+            });
+        }
+        let count = kept_in_place;
+        let heap = match make(size) {
+            Ok(heap) => heap,
+            Err(e) => {
+                tracing::warn!(error = %e, count, sampler, size, "no host descriptor heap");
+                return None;
             }
         };
         // SAFETY: a live heap.
@@ -3894,6 +3924,15 @@ pub(crate) fn placed_texture(view: &View) -> Option<PlacedTexture> {
     } else {
         None
     };
+    // A read-only view over the title's own target the host holds in a
+    // stand-in format (R11G11B10 for R9G9B9E5): that target itself, which
+    // is where the host wrote what the view shows.
+    let owner = owner.or_else(|| {
+        if *unordered || resource[12] & 7 != 0 {
+            return None;
+        }
+        crate::resource::stand_in_at(address, resource)
+    });
     let texture = match &owner {
         Some(owner) => owner.as_ptr(),
         None if *unordered => return None,
@@ -4156,6 +4195,40 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn view_layout_keeps_the_title_when_it_fits() {
+        // No host limit: every title slot, then the dynamic ones.
+        assert_eq!(super::view_layout(100, 0, 10), (100, 110));
+        // Capped, title fits with room: kept whole, heap ends at the null slot.
+        assert_eq!(super::view_layout(500_000, 999_999, super::DYNAMIC), (500_000, 1_000_000));
+    }
+
+    #[test]
+    fn view_layout_cuts_title_past_the_cap_only() {
+        let null = super::PORTABLE_VIEWS - 1;
+        // A title heap of 1,245,184 on a capped host keeps what lets the dynamic slots fit.
+        let (kept, size) = super::view_layout(1_245_184, null, super::DYNAMIC);
+        assert_eq!((kept, size), (null - super::DYNAMIC, super::PORTABLE_VIEWS));
+        assert!(kept >= super::TITLE_SLOTS_IN_USE);
+        assert!(kept + super::DYNAMIC <= size);
+        // Never more than the title has.
+        assert_eq!(super::view_layout(10, null, super::DYNAMIC).0, 10);
+    }
+
+    #[test]
+    fn capped_dynamic_is_clamped() {
+        let null = super::PORTABLE_VIEWS - 1;
+        assert_eq!(super::capped_dynamic(null, None), super::DYNAMIC);
+        assert_eq!(super::capped_dynamic(null, Some(1)), super::DYNAMIC);
+        // half the heap: 524288 is taken as 499,999 on a 1,000,000 heap
+        assert_eq!(super::capped_dynamic(null, Some(524_288)), 499_999);
+        assert_eq!(super::capped_dynamic(null, Some(400_000)), 400_000);
+        assert_eq!(super::capped_dynamic(null, Some(u32::MAX)), null / 2);
+        // 524288 leaves fewer title slots than seen in use.
+        let (kept, _) = super::view_layout(1_245_184, null, 524_288);
+        assert!(kept < super::TITLE_SLOTS_IN_USE);
+    }
+
     use super::*;
 
     #[test]

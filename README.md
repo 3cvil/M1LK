@@ -25,7 +25,7 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | Goal | Status |
 | --- | --- |
 | 1. Boot to the first loaded scene | Done. Menus, the intro and the first cutscene load and draw. |
-| 2. Peak memory 13 GB or less | **In progress.** Peak 21.6 GB on Series X. New savers, now being tested: title windows in VRAM (needs Resizable BAR), constants ported to the card, and 2 MB memory sections. Series S (the title budgets 7.8 GB instead of 13.5 GB) is the next big lever. Its crash on the first scene is fixed (see the changelog), and memory is being measured. |
+| 2. Peak memory 13 GB or less | **In progress.** Peak 21.6 GB on Series X. New savers, now being tested: title windows in VRAM (needs Resizable BAR), constants ported to the card, and 2 MB memory sections. Series S (the title budgets 7.8 GB instead of 13.5 GB) is the next big lever. Series S now runs with a picture and menus: **17.1 GB peak and 4.5 fps median**, against 21.3 GB and 3.5 fps on Series X. |
 | 3. Stable for 30 minutes | **Close.** The latest run lasted the full 20-minute test with no crash (earlier runs: 5 min 46 s, then 10 min 19 s). |
 | 4. Full ray tracing on NVIDIA | BVH builder and wave32 fixes are merged. It will be measured once in-game fps is about 5 or more (shadows, then reflections, then full GI). |
 | 5. 30 fps with ray tracing | Not yet. Menus run at 30 fps; in game, without RT, the median is 0.5 fps because about 80% of each frame is spent waiting on memory paging. The merged build has DLSS Super Resolution, P-core thread placement and a frame-interval switch ready to measure. Frame generation numbers will always be reported next to real fps. |
@@ -42,6 +42,8 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | 2026-11-26 | new build: hair skip, UI mips kept, quiet-copy skip, sliced heap rescan, texture read-backs on a thread, wave32 groupshared guard | as above (copy-back skip on) | 20 min, no crash. **Worst quarter 3.0 fps** (was 0.7), so the bad frames are almost gone; median 3.3 fps (3.6 before, in a different, busier scene). No paging stalls at all. About 3,400 unchanged copies a frame are now skipped, and copies fell to 71 ms. Hair renders cleanly (strands are left out for now). |
 | 2026-11-26 | + wide refresh | as above, plus `VICTORY_WIDE_REFRESH=1`, 15 min with play | Median 3.5 fps (3.3 without), within noise, so it stays optional. The ~1,400 draws a frame shown as dropped are all ray-tracing stages (off in `--no-rt`) and left-out hair strands, so nothing is missing by mistake. |
 | 2026-11-26 | Series S fix | Series S, `--no-rt`, 8 min | **No device removal** (it used to happen at about 2.5 min). The shared-exponent target uses its stand-in format, and the run reached 7 min 48 s at 5.4 fps while the scene was still loading. |
+| 2026-11-26 | Series S fix | Series S, `--no-rt`, 15 min with play | Stable, **median 5.3 fps, peak 17.3 GB**, but the picture was black in game and the menus were missing. |
+| 2026-11-26 | Series S picture fix | Series S, `--no-rt`, 15 min with play | **Picture and pause menu show.** Median 4.5 fps, peak 17.1 GB, no crash. The scene is as dark as on Series X (lighting without ray tracing). |
 
 This table is updated after every test run.
 
@@ -49,6 +51,7 @@ This table is updated after every test run.
 
 Newest first. Each bullet is a step that changed what M1LK does or what it measured.
 
+- **2026-11-26:** **Series S shows a picture.** Two causes. First, on Series S the title renders at 1280x720 and runs its own console upscaler, whose shaders are console machine code that M1LK can't translate yet, so the upscaled image was never written. Series S now defaults to M1LK's spatial upscaler (`VICTORY_UPSCALER` overrides it). Second, the Series S present has two planes, the scene and the interface. M1LK now composites both, reading the plane records at their 72-byte stride (`VICTORY_PLANES=0` turns this off). Both are ported from other VIctory forks (cool_fox, cgbj, mandy-port). Result: **17.1 GB peak, 4.5 fps median**, against 21.3 GB and 3.5 fps on Series X.
 - **2026-11-26:** **Series S no longer crashes.** The title asks for a full-screen render target in a packed HDR format (R9G9B9E5) that NVIDIA can't draw into. M1LK now uses a same-size format that NVIDIA supports (R11G11B10), but only when the card reports the original as unsupported, so AMD is unchanged (`VICTORY_RGB9E5_HOST=0` restores the old behaviour). A render-target format that can't be drawn into now drops its draws instead of removing the device. Also: rectangle clears are sent in batches of 16 (NVIDIA's driver can abort at 64; from VItoria-Shyro / Belobug), and the test runner copies the full run log.
 - **2026-11-26:** new build. Hair strands are left out (no more black smudges), and menu/loading art keeps full resolution. Unchanged memory copies are skipped (about 3,400 a frame). The heap rescan is spread over 16 frames, and texture read-backs run on their own thread. Groupshared memory is guarded for 32-lane NVIDIA waves. **The worst quarter of frames went from 0.7 to 3.0 fps.** The test runner gained short (8 min), quick (15 min), full and soak (40 min) kinds.
 - **2026-11-26:** skipping write-combined copy-back (`VICTORY_SKIP_WC_BACK=1`, from VItoria-Spark) takes the median to **3.6 fps** (was 2.8). Window tails were tried and rejected: they cost RAM. The playtest driver also gained a save library: each run keeps new autosaves, and `run-m1lk.ps1 -FromSave <name>` starts from one.
@@ -404,8 +407,8 @@ publish them.
 
 In priority order (the [Progress](#progress) table has the latest numbers):
 
-1. **Series S picture.** The Series S profile no longer crashes and runs faster (5.3 fps, 17.3 GB peak),
-   but the picture in game is black. The title presents in two planes (scene plus overlay) on Series S.
+1. **Series S upscaler.** Series S now runs with a picture and menus (4.5 fps, 17.1 GB peak). The title's
+   own console upscaler shaders don't translate yet, so a simple spatial upscaler stands in for them.
 2. **RAM use.** Peak commit is about 21 GB on Series X and 17 GB on Series S. The goal is 13 GB or less.
 3. **Frame rate on 8 GB NVIDIA cards.** The median is 3.5 fps on Series X with ray tracing off. The goal
    is 30 fps that looks good (frame generation is fine, but report real fps next to it).
