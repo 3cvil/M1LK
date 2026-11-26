@@ -14,6 +14,31 @@ this fork.
 
 The project is experimental. Expect low frame rates, rendering errors and crashes.
 
+In short, M1LK is an Xbox Series emulator-style compatibility layer for Windows. It implements the
+GDK / XGameRuntime platform services and the `d3d12_xs` graphics API on top of desktop Direct3D 12.
+
+## Progress
+
+All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, an i5-12500H CPU and
+16 GB of RAM, on Windows 11. Each run uses the Series X profile.
+
+| Goal | Status |
+| --- | --- |
+| 1. Boot to the first loaded scene | Done. Menus, the intro and the first cutscene load and draw. |
+| 2. Peak memory 13 GB or less | **In progress.** 17.2 GB on the first measured build; 20.0 GB on the 26 Nov build. A fix for duplicated texture copies is being worked on. |
+| 3. Stable for 30 minutes | Not yet. Runs end with the safety watchdog while the machine pages memory to disk: after 5 min 46 s on the first build and 10 min 19 s on the latest (see below). |
+| 4. Full ray tracing on NVIDIA | Being worked on: BVH builder and wave32 fixes. Not yet measured in game. |
+| 5. 30 fps with ray tracing | Not started. Without RT and with shaders not warmed, the latest run reached under 1 fps, with most draws still waiting for their pipelines (the laptop was on battery). |
+
+### Test log
+
+| Date | Build | Settings | Result |
+| --- | --- | --- | --- |
+| 2026-11-26 | memory fix 1 | Series X, `--no-rt`, `VICTORY_TEXTURE_MIP_DROP=1` | Peak 17.2 GB, 5.9 GB of VRAM. Watchdog after 5 min 46 s with heavy paging. |
+| 2026-11-26 | RAM branch | Series X, `--no-rt`, window budget 1 GB, RAM trim 3 GB | Got further (10 min 19 s) but peaked at 20.0 GB, with 7.3 GB of VRAM. Duplicated texture copies (about 5 GB) and a window budget that did not hold were found. |
+
+This table is updated after every test run.
+
 ## Legal notice
 
 - **This repository contains no game files, assets, keys or executables**, and none are distributed
@@ -34,6 +59,67 @@ The project is experimental. Expect low frame rates, rendering errors and crashe
   keep the Windows page file on automatic. If `crashes.log` reports Windows error 1455, increase the page
   file size and retry.
 - To build: [rustup](https://rustup.rs) and Visual Studio Build Tools (see below).
+
+## Step-by-step setup
+
+Follow these steps in order if you have never built a Rust program before. They take about 30 to 60
+minutes, most of it downloads and the first compile.
+
+1. **Check your PC.** You need Windows 10 or 11 (64-bit), an RTX 20-series or newer NVIDIA card (or an
+   RX 6000-series or newer AMD card), at least 16 GB of RAM and about 15 GB of free disk space for the
+   build. Update your graphics driver from NVIDIA's or AMD's website.
+2. **Install Git.** Download it from <https://git-scm.com/download/win>, run the installer and keep the
+   default options.
+3. **Install Visual Studio Build Tools.**
+   1. Download them from <https://visualstudio.microsoft.com/visual-cpp-build-tools/>.
+   2. In the installer, tick **Desktop development with C++**.
+   3. Make sure that **MSVC v143 x64/x86 build tools** and a **Windows 11 SDK** are ticked on the right.
+   4. Click **Install** and wait. It is a few GB.
+4. **Install Rust.**
+   1. Download `rustup-init.exe` from <https://rustup.rs> and run it.
+   2. Press **Enter** to accept the defaults.
+   3. When it finishes, close the window.
+5. **Download M1LK.**
+   1. Open **PowerShell** from the Start menu.
+   2. Run:
+
+      ```powershell
+      cd $HOME
+      git clone https://github.com/3cvil/M1LK.git
+      cd M1LK
+      ```
+
+6. **Run the setup script.** It installs the pinned Rust toolchain, fetches and checks the BCPack format
+   table, builds M1LK, and then asks you to pick your title's executable:
+
+   ```powershell
+   .\Setup.cmd
+   ```
+
+   - The first build takes 10 to 30 minutes.
+   - If it fails with an out-of-memory error, close other programs, run
+     `$env:CARGO_BUILD_JOBS = '4'` and then run `.\Setup.cmd` again.
+   - When asked, choose the executable from **your own** installed copy of the title. M1LK never
+     downloads or ships it.
+7. **Warm the shader cache (strongly recommended).**
+   - From the Start menu, run **M1LK Warm**, or run `%LOCALAPPDATA%\M1LK\m1lk-warm.exe`.
+   - Let it finish. It can take 10 to 40 minutes the first time, and it only needs to run again after an
+     update.
+   - Without it, most of the picture is missing or blocky for the first minutes, because shaders are
+     still being translated.
+8. **Before you play on a 16 GB machine:**
+   - Close your browser and other large programs.
+   - Plug a laptop in to power.
+   - In Windows settings, set sleep to **Never** while plugged in.
+9. **Play.**
+   - From the Start menu, run **M1LK**, or run `%LOCALAPPDATA%\M1LK\m1lk-play.exe --no-rt`.
+   - Accept the title's own terms screen if it shows one.
+   - See [Controls](#controls) for the keys.
+10. **If something goes wrong:**
+    - Run `.\tools\collect-logs.ps1`. It gathers your specs and logs, with personal paths removed.
+    - Open an issue and attach the file it makes (see [Reporting a problem](#reporting-a-problem)).
+
+To update later, run `git pull` in the M1LK folder and then `.\Setup.cmd` again.
 
 ## Building from source
 
@@ -195,13 +281,36 @@ m1lk-play.exe [--rt | --no-rt | --rt-static-bvh] [--warp] [--console series-x|se
 `m1lk.exe --help` lists the commands of the runtime itself (`inspect`, `census`, `shader-info`,
 `translate`, `warm`, `run`, `config`).
 
-## Input
+## Controls
 
-XInput controllers and DualSense are supported. With none connected, the keyboard and mouse drive a
-stand-in controller while the title's window has focus: W A S D and the mouse (or I J K L) are the sticks,
-the right and left mouse buttons (or Z / C) the triggers, Enter / Backspace / X / Y the face buttons,
-Q / E the bumpers, the arrow keys the D-pad, and Esc / Tab are Menu / View. Mouse look, sensitivity and
-key rebinding (`VICTORY_KEYBINDS`) are described in [docs/keyboard-and-mouse.md](docs/keyboard-and-mouse.md).
+XInput controllers (Xbox pads) and DualSense are supported and work without setup. With no controller
+connected, the keyboard and mouse drive a stand-in Xbox pad while the title's window has focus, and the
+title shows its own gamepad prompts.
+
+| Keyboard / mouse | Pad button | Typical use |
+| --- | --- | --- |
+| W A S D | Left stick | Move |
+| Mouse, or I J K L | Right stick | Look / camera |
+| Left mouse button, or C | Right trigger (RT) | Accelerate / fire |
+| Right mouse button, or Z | Left trigger (LT) | Brake / aim |
+| Enter | A | Confirm |
+| Backspace | B | Back / cancel |
+| X | X | |
+| Y | Y | |
+| Q / E | Left / right bumper | |
+| F / H | Left / right stick click | |
+| Arrow keys | D-pad | Menu navigation |
+| Esc | Menu | Pause menu |
+| Tab | View | Map / view |
+
+Tips:
+
+- **The mouse cursor.** While mouse look is on, the cursor is held in the middle of the game window.
+  Alt+Tab to another window to get it back, or set `VICTORY_MOUSE_LOOK=0` to turn mouse look off.
+- **Sensitivity.** `VICTORY_MOUSE_SENSITIVITY=2` turns twice as fast (the default is 1).
+- **Rebinding.** For example, `VICTORY_KEYBINDS=Space=X,LShift=A,Mouse4=LB`.
+
+All names and settings are in [docs/keyboard-and-mouse.md](docs/keyboard-and-mouse.md).
 
 ## Where M1LK writes its files
 

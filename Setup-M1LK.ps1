@@ -94,4 +94,8 @@ foreach ($entry in @(
     $shortcut.WorkingDirectory = $InstallDir
     $shortcut.Save()
 }
+$warm = $shell.CreateShortcut((Join-Path $ShortcutDirectory 'M1LK Warm.lnk'))
+$warm.TargetPath = Join-Path $InstallDir 'm1lk-warm.exe'
+$warm.WorkingDirectory = $InstallDir
+$warm.Save()
 Write-Host "Open M1LK from $ShortcutDirectory. The FSR Quality 4K shortcut uses the tested ray-tracing profile."
