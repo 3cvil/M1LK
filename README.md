@@ -26,9 +26,9 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | --- | --- |
 | 1. Boot to the first loaded scene | Done. Menus, the intro and the first cutscene load and draw. |
 | 2. Peak memory 13 GB or less | **In progress.** 17.2 GB on the first measured build; 20.0 GB on the 26 Nov build. A fix for duplicated texture copies is being worked on. |
-| 3. Stable for 30 minutes | Not yet. Runs end with the safety watchdog while the machine pages memory to disk: after 5 min 46 s on the first build and 10 min 19 s on the latest (see below). |
+| 3. Stable for 30 minutes | **Close.** The latest run lasted the full 20-minute test with no crash (earlier runs: 5 min 46 s, then 10 min 19 s). |
 | 4. Full ray tracing on NVIDIA | Being worked on: BVH builder and wave32 fixes. Not yet measured in game. |
-| 5. 30 fps with ray tracing | Not started. Without RT and with shaders not warmed, the latest run reached under 1 fps, with most draws still waiting for their pipelines (the laptop was on battery). |
+| 5. 30 fps with ray tracing | Not started. Menus run at 30 fps; in game, without RT, the median is 0.5 fps because about 80% of each frame is spent waiting on memory paging. Next: cut RAM, then DLSS Super Resolution and P-core thread placement. |
 
 ### Test log
 
@@ -36,6 +36,7 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | --- | --- | --- | --- |
 | 2026-11-26 | memory fix 1 | Series X, `--no-rt`, `VICTORY_TEXTURE_MIP_DROP=1` | Peak 17.2 GB, 5.9 GB of VRAM. Watchdog after 5 min 46 s with heavy paging. |
 | 2026-11-26 | RAM branch | Series X, `--no-rt`, window budget 1 GB, RAM trim 3 GB | Got further (10 min 19 s) but peaked at 20.0 GB, with 7.3 GB of VRAM. Duplicated texture copies (about 5 GB) and a window budget that did not hold were found. |
+| 2026-11-26 | RAM branch + pressure sweeps | Series X, `--no-rt`, mip drop 2 (textures of 512 px and up), window budget 1 GB, RAM trim 3 GB | **20 min with no crash** (the full test). Menus at 30 fps; in game a median of 0.5 fps, with frames spending 0.9 s (median) to 9.6 s (worst quarter) waiting on paging. Peak 21.6 GB, 6.8 GB of VRAM. The largest memory buckets were made shared buffers (8.1 GB), title window copies (5.2 GB) and host textures (5.0 GB). |
 
 This table is updated after every test run.
 
