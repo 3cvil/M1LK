@@ -1,0 +1,130 @@
+name: Bug report
+description: A build failure, crash, rendering problem or performance problem.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing M1LK. The quickest way to fill in the specs and logs is to run
+        `powershell -ExecutionPolicy Bypass -File tools\collect-logs.ps1` and attach the zip it writes.
+
+        **Do not attach** title files, saves, shader caches, frame captures, memory dumps or anything
+        else that contains data from a title. Do not post personal information: user names in paths,
+        IP addresses or e-mail addresses. The log collector removes these from its zip; check it before
+        you upload it.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Problem type
+      options:
+        - Build failure
+        - Crash or freeze
+        - Rendering problem
+        - Performance or memory
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU model and VRAM
+      placeholder: e.g. GeForce RTX 3060 Ti, 8 GB
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: GPU driver version
+      placeholder: e.g. 576.88
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: e.g. Ryzen 5 5600
+    validations:
+      required: true
+  - type: input
+    id: ram
+    attributes:
+      label: RAM
+      placeholder: e.g. 16 GB
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      placeholder: e.g. Windows 11 24H2, build 26100
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage the title is installed on
+      options:
+        - NVMe SSD
+        - SATA SSD
+        - HDD
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: M1LK commit
+      description: The output of `git rev-parse --short HEAD`, or the date of the source ZIP.
+    validations:
+      required: true
+  - type: dropdown
+    id: console
+    attributes:
+      label: Console mode
+      options:
+        - series-x
+        - series-s
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Launcher flags and environment variables
+      description: Everything you passed to m1lk-play.exe or m1lk.exe, and every VICTORY_* variable you set.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: progress
+    attributes:
+      label: How far it got, frame rate and peak memory
+      description: >-
+        For example: reached the first gameplay scene; 9-12 FPS; Task Manager showed 17.5 GB committed
+        and 7.6 GB dedicated GPU memory.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        Attach the zip from tools/collect-logs.ps1 (drag it into this box). Logs are required for
+        crashes. Without the script: for a build problem attach the full cargo output; for a runtime
+        problem attach the run log (logs\latest.txt in the M1LK folder names it), every crashes.log
+        (state\<title id>\crashes.log) and the last line of the warm log (logs\latest-warm.txt).
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I attached logs (the collect-logs zip or the files above), or this is not a crash or build failure.
+          required: true
+        - label: My attachments contain no title files, saves, caches, captures, memory dumps or personal information.
+          required: true

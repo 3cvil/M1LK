@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="M1LK logo: milk being poured into a glass">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e2e8f0" stop-opacity="0.35"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#e2e8f0" stop-opacity="0.3"/>
+    </linearGradient>
+    <linearGradient id="milk" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f1f5f9"/>
+      <stop offset="0.45" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbe4ee"/>
+    </linearGradient>
+    <linearGradient id="stream" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8eef5"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <clipPath id="inside">
+      <path d="M176 196 L336 196 L318 432 Q316 446 302 446 L210 446 Q196 446 194 432 Z"/>
+    </clipPath>
+  </defs>
+
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <g transform="translate(25.6 46) scale(0.9)">
+
+  <!-- milk carton tilted, pouring from its open spout (bottom-left corner of the group) -->
+  <g transform="translate(298 84) rotate(58) scale(0.78)">
+    <!-- body -->
+    <rect x="-34" y="-150" width="68" height="110" rx="6" fill="#f8fafc"/>
+    <rect x="-34" y="-118" width="68" height="40" fill="#2f80ed"/>
+    <!-- gable top with spout -->
+    <path d="M-34 -40 L34 -40 L20 -8 L-20 -8 Z" fill="#e2e8f0"/>
+    <path d="M-20 -8 L20 -8 L14 0 L-14 0 Z" fill="#cbd5e1"/>
+  </g>
+
+  <!-- milk stream -->
+  <path d="M300 74 C282 96 262 128 258 170 L258 330 L272 330 L272 172 C276 134 292 104 310 84 Z" fill="url(#stream)"/>
+
+  <!-- milk inside the glass -->
+  <g clip-path="url(#inside)">
+    <path d="M150 300 Q190 284 230 298 Q262 310 266 300 Q300 284 340 296 L360 460 L150 460 Z" fill="url(#milk)"/>
+    <!-- splash ring where the stream lands -->
+    <ellipse cx="265" cy="300" rx="34" ry="8" fill="#ffffff" opacity="0.9"/>
+    <circle cx="236" cy="286" r="5" fill="#ffffff"/>
+    <circle cx="294" cy="284" r="4" fill="#ffffff"/>
+    <circle cx="282" cy="276" r="3" fill="#ffffff"/>
+  </g>
+
+  <!-- glass -->
+  <path d="M168 180 L344 180 L324 434 Q321 458 298 458 L214 458 Q191 458 188 434 Z"
+        fill="url(#glass)" stroke="#cbd5e1" stroke-width="8" stroke-linejoin="round"/>
+  <ellipse cx="256" cy="180" rx="88" ry="10" fill="none" stroke="#e2e8f0" stroke-width="6" opacity="0.8"/>
+  <!-- highlight -->
+  <path d="M190 206 L206 420" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity="0.35"/>
+
+  </g>
+</svg>
