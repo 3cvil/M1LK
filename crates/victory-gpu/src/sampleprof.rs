@@ -249,7 +249,7 @@ mod imp {
             let mine = SAMPLER_TID.load(Ordering::Relaxed);
             if mine != 0 && GetCurrentThreadId() == mine && matches!(code, 0xC000_0005 | 0xC000_0006 | 0xC000_001D | 0xC000_0094) {
                 let ctx = &mut *(*info).ContextRecord;
-                ctx.Rip = sampler_fault_exit as usize as u64;
+                ctx.Rip = (sampler_fault_exit as unsafe extern "system" fn() -> !) as usize as u64;
                 // As if called: aligned, with a return address slot and shadow space.
                 ctx.Rsp = (ctx.Rsp.saturating_sub(0x200) & !0xf) - 8;
                 return -1; // EXCEPTION_CONTINUE_EXECUTION
