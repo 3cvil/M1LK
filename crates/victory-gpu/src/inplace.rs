@@ -383,6 +383,16 @@ fn constants_place(device: &ID3D12Device, start: u64, len: u64, min: u64, fresh:
         Some(i) => i,
         None => {
             if !constants_wanted(at, end - at, min) {
+                // Big enough and low, but not one run of a section: said
+                // (it was silent), a few times.
+                if end - at >= min.max(1) && end <= LOW && CSTATS[3].fetch_add(1, Ordering::Relaxed) < 4 {
+                    tracing::warn!(
+                        start = format_args!("{at:#x}"),
+                        bytes = end - at,
+                        cover = ?cover(at as usize, (end - at) as usize),
+                        "the constants heap not in place: not one run of a section (VICTORY_INPLACE_CONSTANTS)"
+                    );
+                }
                 return Ok(None);
             }
             if !fresh {

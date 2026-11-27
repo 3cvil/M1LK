@@ -720,9 +720,21 @@ pub(crate) fn page_window(pages: &[usize], offset: usize, len: usize) -> Option<
 
 /// Renderer port 1 (`VICTORY_PORT_CONSTANTS=1`; the GPU side's half is
 /// `victory_gpu`'s `port`): read here for xmem's part, [`arrange`].
+///
+/// `VICTORY_INPLACE_CONSTANTS=1` needs the same arranging: the heap opens
+/// only where the reservation is one run of one section, which the title's
+/// own order of mapping does not give.
 fn port_on() -> bool {
-    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var("VICTORY_PORT_CONSTANTS").is_ok_and(|v| v.trim() == "1"));
+    static ON: LazyLock<bool> = LazyLock::new(|| {
+        let var = |name: &str| std::env::var(name).ok();
+        arrange_wanted(var("VICTORY_PORT_CONSTANTS").as_deref(), var("VICTORY_INPLACE_CONSTANTS").as_deref())
+    });
     *ON
+}
+
+/// Whether [`arrange`] runs, from the two switches' values.
+fn arrange_wanted(port: Option<&str>, inplace: Option<&str>) -> bool {
+    port.is_some_and(|v| v.trim() == "1") || inplace.is_some_and(|v| v.trim() == "1")
 }
 
 /// The title's reservations of 64 KiB pages for 32-bit graphics memory:
@@ -1253,6 +1265,14 @@ pub(crate) fn module() -> HleModule {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arranging_follows_either_switch() {
+        assert!(!arrange_wanted(None, None));
+        assert!(!arrange_wanted(Some("0"), Some("alt")));
+        assert!(arrange_wanted(Some("1"), None));
+        assert!(arrange_wanted(None, Some(" 1 ")));
+    }
+
     use super::*;
 
     fn query(address: *const c_void) -> BasicInformation {
