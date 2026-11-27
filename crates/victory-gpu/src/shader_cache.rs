@@ -87,6 +87,7 @@ fn build() -> &'static [u8; 32] {
             "VICTORY_LDS_FLAGS",
             "VICTORY_WAVE_ZERO_MASK",
             "VICTORY_THREAD_TICKET",
+            "VICTORY_SECTION_SCAN_CONT",
             "VICTORY_BVH_MISS",
             "VICTORY_F16_NEAREST",
             "VICTORY_STRICT_JOINS",
