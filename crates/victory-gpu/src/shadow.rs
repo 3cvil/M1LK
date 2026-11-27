@@ -1733,6 +1733,49 @@ impl Drop for Shadow {
 /// write is simply never put back, with a kept one it would be taken for a
 /// write of a later submission and put back then, over whatever the title
 /// wrote there since.
+/// M1LK ZCM Tell: the card's writes into title memory in place are told
+/// to the other copies of those bytes (placed textures, copies of buffers
+/// inside), as a copy-back tells them. `M1LK_ZCM_TELL=1`; off by default.
+fn zcm_tell() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_ZCM_TELL").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!("M1LK ZCM Tell: card writes in place are told to other copies (VICTORY_ZCM_TELL=1)");
+        }
+        on
+    })
+}
+
+/// [`zcm_tell`]: the declared ranges `[from, to)` (title addresses) of a
+/// copy in place at `[start, end)`, clipped to it, sorted and joined where
+/// they overlap or touch, as `(address, length)`.
+fn in_place_written(start: usize, end: usize, ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut sorted: Vec<(usize, usize)> = ranges
+        .iter()
+        .map(|&(from, to)| (from.clamp(start, end), to.clamp(start, end)))
+        .filter(|(from, to)| from < to)
+        .collect();
+    sorted.sort_unstable();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in sorted {
+        match spans.last_mut() {
+            Some(last) if from <= last.1 => last.1 = last.1.max(to),
+            _ => spans.push((from, to)),
+        }
+    }
+    spans.into_iter().map(|(from, to)| (from, to - from)).collect()
+}
+
+#[cfg(test)]
+#[test]
+fn in_place_written_clips_and_joins_declared_ranges() {
+    let ranges = [(0x3000, 0x5000), (0x1000, 0x2000), (0x2000, 0x2800), (0x4000, 0x9000), (0x0, 0x800), (0xa000, 0xb000)];
+    assert_eq!(in_place_written(0x1000, 0x8000, &ranges), vec![(0x1000, 0x1800), (0x3000, 0x5000)]);
+    assert!(in_place_written(0x1000, 0x8000, &[]).is_empty());
+    assert!(in_place_written(0x1000, 0x8000, &[(0x9000, 0xa000)]).is_empty());
+}
+
 fn keeps() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_SNAPSHOTS").is_some_and(|v| v == "1"))
@@ -2153,7 +2196,9 @@ impl Shadow {
             // `copy_back` and `copy_back_done` pass over a copy in place),
             // so that what reads or writes it on the CPU at a later
             // submission waits for them as it does for a copy's range.
-            if crate::inplace::constants_on() {
+            // `VICTORY_ZCM_TELL` declares it for windows in place too, so
+            // that its landing tells the other copies (`copy_back_done`).
+            if crate::inplace::constants_on() || zcm_tell() {
                 let len = len.min(self.left(address));
                 list.defer_gpu_write(self, address as usize, len as usize);
             }
@@ -2527,6 +2572,16 @@ impl Shadow {
     /// last submission that declared it is ([`Flights`]).
     pub(crate) fn copy_back_done(&self, ranges: &[(usize, usize)]) {
         if self.place.is_some() {
+            if zcm_tell() {
+                // The card wrote title memory itself: what a copy-back's
+                // `Owners::publish` does for a copy (`watch::writing`: other
+                // copies' guards opened, placed textures there remade) is done
+                // for the declared ranges, which may hold what it wrote.
+                let end = (self.start + self.len) as usize;
+                for (at, n) in in_place_written(self.start as usize, end, ranges) {
+                    crate::watch::writing(at, n);
+                }
+            }
             return;
         }
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
