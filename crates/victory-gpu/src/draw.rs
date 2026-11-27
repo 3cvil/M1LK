@@ -249,6 +249,9 @@ pub(crate) struct State {
     depth: usize,
     /// The host state the bound depth view needs ([`depth_state`]).
     depth_state: u32,
+    /// With `M1LK_LOW_SHADOWS`: the slice of a depth texture array the bound
+    /// targets are, when they are depth only ([`crate::lowdetail`]).
+    shadow_slice: Option<u32>,
     /// The title's primitive topology (the host's may differ).
     topology: u32,
     /// What the title set that goes straight onto the host list, kept for
@@ -783,10 +786,14 @@ impl State {
         }
         self.depth = 0;
         self.depth_state = DEPTH_WRITE;
+        self.shadow_slice = None;
         let dsv = crate::descriptor::dsv_record(depth).and_then(|record| {
             let texture = crate::resource::host_resource(record.resource)?;
             self.depth = record.resource as usize;
             self.depth_state = depth_state(texture, record.depth_desc().as_ref());
+            if handles.is_empty() && crate::lowdetail::shadows_on() {
+                self.shadow_slice = array_slice(texture, record.depth_desc().as_ref());
+            }
             if crate::resource::depth_and_unordered(record.resource) {
                 crate::resource::DEPTH_UNORDERED[1].fetch_add(1, Ordering::Relaxed);
             }
@@ -2435,10 +2442,29 @@ impl State {
         });
     }
 
+    /// Whether the lower-detail preset leaves this draw (or mesh dispatch)
+    /// out: a shadow slice not kept, or a draw rule ([`crate::lowdetail`]).
+    fn low_held(&self) -> bool {
+        let held = self.shadow_slice.is_some_and(crate::lowdetail::shadow_slice_held) || self.low_rule_held();
+        if held {
+            crate::lowdetail::note_skipped();
+        }
+        held
+    }
+
+    /// Whether a draw rule leaves this work out (the caller counts it).
+    fn low_rule_held(&self) -> bool {
+        crate::pipeline::low_holds(self.pipeline as This)
+    }
+
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32, flags: Option<u32>) {
         // It may write the arguments a window holds clamped.
         self.window = None;
+        if self.low_rule_held() {
+            crate::lowdetail::note_skipped();
+            return;
+        }
         let builder = crate::pipeline::is_builder(self.pipeline as This);
         #[cfg(feature = "diagnostics")]
         if builder {
@@ -2932,6 +2958,9 @@ impl State {
     pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32) {
         ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         self.window = None;
+        if self.low_held() {
+            return;
+        }
         #[cfg(feature = "diagnostics")]
         self.trace("mesh", x, 0);
         let ran = mesh_test() != 1
@@ -3335,6 +3364,9 @@ impl State {
     ) {
         ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         self.window = None;
+        if self.low_held() {
+            return;
+        }
         #[cfg(feature = "diagnostics")]
         self.trace("draw", vertices, first);
         let ready = self.prepare(list, false);
@@ -3504,6 +3536,9 @@ impl State {
     ) {
         ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         self.window = None;
+        if self.low_held() {
+            return;
+        }
         #[cfg(feature = "diagnostics")]
         self.trace("indexed", indices, first);
         // Indexed rectangles are drawn by the rectangle geometry stage
@@ -3553,6 +3588,19 @@ impl State {
         arguments: u64,
         count: Option<u64>,
     ) -> bool {
+        // A dispatch (2) follows its draw rule only; the targets bound are not its own.
+        let held = if kind == 2 {
+            let held = self.low_rule_held();
+            if held {
+                crate::lowdetail::note_skipped();
+            }
+            held
+        } else {
+            self.low_held()
+        };
+        if held {
+            return true;
+        }
         let ran = self.run_indirect(list, (kind, stride, max), arguments, count);
         if kind == 2 && max != 0 && crate::pipeline::is_builder(self.pipeline as This) {
             if !ran {
@@ -3949,6 +3997,22 @@ fn view_kind(view: &View) -> Option<ResourceType> {
 /// the write state.
 /// shortcut: whole textures have one state, so a view that writes one of
 /// two planes counts as writing.
+/// The slice of a depth texture array a depth view is of one slice of
+/// (what a shadow cascade is drawn into); `None` for any other view.
+fn array_slice(texture: &ID3D12Resource, desc: Option<&D3D12_DEPTH_STENCIL_VIEW_DESC>) -> Option<u32> {
+    let desc = desc?;
+    if desc.ViewDimension != D3D12_DSV_DIMENSION_TEXTURE2DARRAY {
+        return None;
+    }
+    // SAFETY: the view dimension says which member is set.
+    let view = unsafe { desc.Anonymous.Texture2DArray };
+    if view.ArraySize != 1 {
+        return None;
+    }
+    // SAFETY: a live texture.
+    (unsafe { texture.GetDesc() }.DepthOrArraySize >= 2).then_some(view.FirstArraySlice)
+}
+
 fn depth_state(texture: &ID3D12Resource, desc: Option<&D3D12_DEPTH_STENCIL_VIEW_DESC>) -> u32 {
     // D16_UNORM and D32_FLOAT: depth formats without a stencil plane.
     const ONE_PLANE: [i32; 2] = [55, 40];

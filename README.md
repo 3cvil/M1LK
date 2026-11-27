@@ -385,6 +385,25 @@ $env:M1LK_AMBIENT_FALLBACK = '1'
 - `M1LK_PIPELINE_WAIT_MS=24` shortens the per-frame wait for background pipeline creation (default
   500 ms); draws may be skipped until their pipeline is ready.
 
+### Lower-detail preset (optional)
+
+These switches cut CPU-side draw preparation (frame time is roughly linear in draws) at the cost of
+picture quality. All are off by default; with none set, nothing changes. The frame line in the log
+shows `low_skipped=<n>/frame`, the draws and dispatches left out.
+
+- `M1LK_LOW_SHADOWS=1` leaves out the draws of every shadow cascade but the nearest. It finds them by
+  shape, not by name: a draw with no colour target whose depth view is one slice of a depth texture
+  array. A larger number (`M1LK_LOW_SHADOWS=2`) keeps that many cascades. The title's own clears still
+  run, so skipped slices are left cleared. Shadows that use a plain (non-array) depth texture are not
+  found this way.
+- `M1LK_DRAW_RULES=<file>` loads a rule file of your own: one shader hash per line with `skip`,
+  `every <n>` or `every <n> at <k>` (run in one frame of n). Use it for reflections, fog or anything
+  else you have measured and found too costly; they cannot be found by shape. The log says how many
+  rules loaded. The repository ships no real hashes; see
+  [docs/examples/draw-rules.example.txt](docs/examples/draw-rules.example.txt).
+
+The rule format follows the mod files of the Kitty6 fork (GPL-3.0).
+
 ## AMD settings
 
 AMD Radeon remains supported. The upstream Radeon profile with ray tracing and FSR Quality at 4K is:

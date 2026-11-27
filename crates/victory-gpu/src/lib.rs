@@ -52,6 +52,8 @@ mod indirect;
 mod inplace;
 #[cfg(windows)]
 mod lowcommit;
+#[cfg(windows)]
+mod lowdetail;
 mod material_demand;
 #[cfg(windows)]
 mod port;
