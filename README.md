@@ -2,35 +2,57 @@
 
 # M1LK
 
-M1LK is a low-end NVIDIA-focused Xbox Series compatibility runtime for Windows x64, based on
-[VIctory](https://github.com/Marvisak/VIctory) and the [DexNom fork](https://github.com/DexNom/VIctory).
-It loads an Xbox Series title's x86-64 executable from an installation you supply, provides the
-console platform services underneath it, and translates its GPU work to Direct3D 12.
+![Status: playable, about 4 fps](https://img.shields.io/badge/status-playable%20%C2%B7%20~4%20fps-green) ![Tested on RTX 4060 Laptop 8 GB](https://img.shields.io/badge/tested%20on-RTX%204060%20Laptop%208%20GB-76b900) ![RAM: 16 GB PC](https://img.shields.io/badge/RAM-16%20GB%20PC-lightgrey) ![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![Language: Rust](https://img.shields.io/badge/language-Rust-orange) ![GPU: NVIDIA only](https://img.shields.io/badge/GPU-NVIDIA%20only-76b900)
 
-The target machine for this fork is a PC with an NVIDIA GPU with **8 GB of VRAM** and **16 GB of system
-RAM**. AMD Radeon remains supported: the AMD code paths inherited from upstream (including the FSR
-upscaler profiles and the experimental ray-tracing path) are kept and are not removed or regressed by
-this fork.
+M1LK is an Xbox Series compatibility runtime for Windows x64, written in Rust and tuned for
+**low-end NVIDIA PCs: 8 GB of VRAM and 16 GB of system RAM**. It is based on
+[VIctory](https://github.com/Marvisak/VIctory) and the [DexNom fork](https://github.com/DexNom/VIctory).
+It loads an Xbox Series title's x86-64 executable from an installation you supply, implements the
+GDK / XGameRuntime platform services underneath it, and translates its `d3d12_xs` GPU work to desktop
+Direct3D 12. M1LK targets NVIDIA only; AMD users should use other projects.
+
+> [!IMPORTANT]
+> **You need your own copy of the game.** M1LK contains and distributes no game files, code, assets,
+> keys or download links. It only runs a title you own and installed yourself. See the
+> [legal notice](#legal-notice).
 
 The project is experimental. Expect low frame rates, rendering errors and crashes.
 
-In short, M1LK is an Xbox Series emulator-style compatibility layer for Windows. It implements the
-GDK / XGameRuntime platform services and the `d3d12_xs` graphics API on top of desktop Direct3D 12.
+## Status
 
-## Progress
+All figures come from the reference machine (RTX 4060 Laptop GPU 8 GB, i5-12500H, 16 GB RAM,
+Windows 11), Series S profile, ray tracing off, with scripted keyboard and mouse play. Each one is
+taken from the [test log](#test-log) below.
 
-All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, an i5-12500H CPU and
-16 GB of RAM, on Windows 11. Runs now use the Series S profile (smaller title memory budget). The test log below is filled in automatically after every test run.
-
-| Goal | Status |
+| | Where M1LK is today |
 | --- | --- |
-| 1. Boot to the first loaded scene | Done. Menus, the intro and the first cutscene load and draw. |
-| 2. Peak memory 13 GB or less | **In progress.** Series S peaks at **16.4-16.9 GB** (Series X 21.3 GB). On a 16 GB laptop free RAM drops to almost nothing, which costs fps. Next: keeping title memory in place instead of copying it (`VICTORY_INPLACE`) and fixing the constants port, which turned out to place nothing yet. |
-| 3. Stable for 30 minutes | **Close.** Every recent run lasted its full 15-20 minute test with no crash. A 40-minute soak is next. |
-| 4. Full ray tracing on NVIDIA | BVH builder and wave32 fixes are merged. It will be measured once in-game fps is about 5 or more (shadows, then reflections, then full GI). |
-| 5. 30 fps with ray tracing | Not yet. In game, without RT: **about 4-5 fps** (5.1 fps median while walking). The graphics card is busy only about 7% of each frame; the rest is CPU-side copying of title memory and waiting on submissions, so that is what we are cutting next. Frame generation numbers will always be reported next to real fps. |
+| **Reaches** | Menus, the intro, the first cutscene and the opening scenes in the game world. |
+| **Playable** | Yes. You control the character: walk, sprint, strafe, jump, mouse look and the pause menu all respond (test 4 onward). |
+| **Story progress** | The opening scenes. Tests so far play inside them. |
+| **Rendering** | Complete picture in the world, but dark without ray tracing: window and outdoor light is lit; interiors and backlit people come out near black. |
+| **Performance** | **About 3.5-4.3 fps walking median** in recent runs (range 2.6-5.4), 3-4.9 fps standing. A frame takes about 250 ms, mostly CPU-side preparing and copying title memory. |
+| **Stability** | Recent 15-minute tests run to the end without a crash. Longest session without a crash: 20 minutes (tests 3-6). A 40-minute soak has not been run yet. |
+| **Peak RAM** | 15.8-17.5 GB (goal: 13 GB). |
+| **Ray tracing** | BVH builder and wave32 fixes are merged; not measured in game yet. |
 
-### Test log
+### Milestones
+
+- [x] Boot to the menus, the intro and the first cutscene.
+- [x] Load into the game world and control the character, with the pause menu (test 4).
+- [x] 20 minutes without a crash (test 3).
+- [x] Series S profile runs with a full picture and HUD (test 10).
+- [x] Paging stalls removed from the median frame: 0.5 fps to 2.8 fps, then about 4 fps (tests 3-14).
+- [ ] Peak RAM 13 GB or less.
+- [ ] 40-minute soak without a crash.
+- [ ] Ray tracing measured in game on NVIDIA.
+- [ ] 30 real fps (frame generation numbers are always reported next to real fps).
+
+## Test log
+
+Every test run is logged here automatically, with its settings and a picture check.
+
+<details>
+<summary>All test runs (newest at the bottom)</summary>
 
 | # | Date | Build | Settings | Result |
 | --- | --- | --- | --- | --- |
@@ -60,9 +82,11 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | 24 | 2026-11-27 | in-place constants rerun after the arrange fix | series-s, --no-rt, VICTORY_INPLACE_CONSTANTS=1, VICTORY_PORT_CONSTANTS=- | standing/all median 3.6 fps (127 samples), peak 10003 draws/frame; WALKING median 3.8 fps, low 2.4 (46 samples); peak 16.3 GB. Not a gain: the switch was on but still opened no memory regions (the heap is split across sections), so this is the baseline path. Ran on battery power with heavy paging, so ~3.6 fps should not be compared with the plugged-in runs (~4 to 5 fps). Picture: no render artifacts in the flagged shots (they were ceiling lights and a fade); dark without RT, near-black around 735 to 800 s (unlit room). |
 | 25 | 2026-11-27 | GPU detile + in-place constants (fps) | series-s, --no-rt, VICTORY_INPLACE_CONSTANTS=1, VICTORY_PORT_CONSTANTS=-, VICTORY_GPU_DETILE=1 | standing/all median 1.3 fps (44 samples), peak 8424 draws/frame; WALKING median 2.9 fps, low 0 (7 samples); peak 17.5 GB. Not adopted. GPU detiling ran without errors but did not lower texture time, and some textures came out scrambled (a dotted grid over the sky and walls), so one tiling layout is unpacked wrongly. The machine also froze for about 7 minutes with free RAM at the floor, and the run was mostly on battery, so these fps numbers are not comparable. In-place constants was still inactive (0 regions). |
 | 26 | 2026-11-27 | plugged-in baseline with the submit profiler (the copy profiler was not in this build) | series-s, --no-rt, VICTORY_COPY_PROF=1 (inactive), VICTORY_SUBMIT_PROF=1 | standing/all median 3 fps (86 samples), peak 9105 draws/frame; WALKING median 3.5 fps, low 0.4 (44 samples); peak 17.2 GB. Plugged in, but it started with less free RAM, paged about 4x harder than test 24 and stalled for about 4 minutes, so it is not a clean baseline. Plugged-in vs battery runs show no fps difference beyond run-to-run noise (about 0.5-1 fps); free RAM at launch predicts results better. Submit profile: memory sweep ~48 ms per frame is the largest submit-side cost. Picture: complete and sharp, no scrambled textures; faint 1-pixel dither in very dark areas. |
-| 27 | 2026-11-27 | batch the per-record indirect clamps (about 2,700 extra GPU passes a frame now) | series-s, --no-rt, VICTORY_INDIRECT_WINDOW=1 | standing/all median 4.3 fps (136 samples), peak 8263 draws/frame; WALKING median 4.3 fps, low 2 (47 samples). Picture check pending. |
+| 27 | 2026-11-27 | batch the per-record indirect clamps (about 2,700 extra GPU passes a frame now) | series-s, --no-rt, VICTORY_INDIRECT_WINDOW=1 | standing/all median 4.3 fps (136 samples), peak 8263 draws/frame; WALKING median 4.3 fps, low 2 (47 samples); peak 17.0 GB. The batching engaged (re-bounded indirect commands per frame fell from about 3,700 to about 1,000, with about 2,000 reused), but the fps gain over test 26 is not attributed to it: this run started with 2 GB more free RAM, paged about half as hard and had no profiler running, and the result is within run-to-run noise of earlier unprofiled runs (3.6-4.8 fps). A back-to-back on/off pair is queued. Picture: same scene as before with every object present and no new artifacts; still dark, noisy and flat-lit without ray tracing. |
 
 This table is updated after every test run.
+
+</details>
 
 ## Changelog
 
@@ -131,7 +155,7 @@ Everything here is opt-in unless marked as a default, so the upstream (including
 
 - Windows 10 or 11, 64-bit, and a CPU with AVX2.
 - A Direct3D 12 GPU with Shader Model 6.6 and mesh shader support and a current driver. On NVIDIA this
-  means a GeForce RTX 20 series card or newer. On AMD, a Radeon RX 6000 series card or newer.
+  means a GeForce RTX 20 series card or newer. M1LK is NVIDIA-only and is tested on an RTX 4060 Laptop.
 - Several GiB of free Windows commit charge at startup. With 16 GB of RAM, close other programs and
   keep the Windows page file on automatic. If `crashes.log` reports Windows error 1455, increase the page
   file size and retry.
