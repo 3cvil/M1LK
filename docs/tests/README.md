@@ -68,5 +68,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 39 | 2026-11-27 | round 1: ONE change on vs baseline: constants heap in place | 4 | 4.4 | 16.9 | 144 | see README | 41* | [chart](test-39.svg) |
 | 40 | 2026-11-27 | round 1: ONE change on vs baseline: texture detiling on the card | 2.2 | 4.3 | 18.7 | 160 | see README | 36* | [chart](test-40.svg) |
 | 41 | 2026-11-27 | CPU sampling profiler (where the ~215 ms frame goes, per thread and f... | 4.1 | 4.4 | 16.8 | 168 | unchecked | 43* | [chart](test-41.svg) |
+| 42 | 2026-11-27 | VIctory-NVIDIA snapshot (test/vnv-base), frame generation off, same s... | - | - | 5.4 | - | unchecked | - | [chart](test-42.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
