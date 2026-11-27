@@ -175,6 +175,7 @@ pub(crate) fn make_all(threads: usize, done: &(dyn Fn() + Sync)) -> Made {
                             "mesh" => "mesh",
                             _ => "compute",
                         },
+                        ambient: crate::ambient::role(hash).or_else(|| crate::ambient::role_by_name(&bytes)),
                         hash: hash.to_owned(),
                         hair: super::hair_strands(&bytes),
                         container: bytes,

@@ -46,6 +46,11 @@ impl Policy {
         Self { static_bvh: true, ..Self::new(None, false, true, true, false) }
     }
 
+    /// `--no-rt` / `VICTORY_RAY_TRACING=0`.
+    pub(crate) fn rays_off(self) -> bool {
+        self.master == Some(false)
+    }
+
     pub(super) fn master_off(self) -> bool {
         self.master == Some(false)
     }

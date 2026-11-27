@@ -142,7 +142,19 @@ pub(crate) enum Shape {
 /// index and the shapes of the values it writes.
 pub(crate) struct Section {
     pub end: usize,
+    /// Past the `v_readlane_b32`s at constant lanes right after the restore (`end + 1..after`):
+    /// a lane read ignores EXEC, so they read what the section left, as inside it (the
+    /// compiler's wave64 reduction reads lane 63 after restoring EXEC).
+    pub after: usize,
     pub shapes: HashMap<Value, Shape>,
+}
+
+impl Section {
+    /// Whether instruction `i` of the block is one the simulation follows for the section
+    /// starting at `start`: inside it, or a lane read after the restore.
+    pub fn holds(&self, start: usize, i: usize) -> bool {
+        i > start && i < self.after && i != self.end
+    }
 }
 
 /// Every whole-wave section of `block`, by start index.
@@ -180,9 +192,35 @@ pub(crate) fn sections(p: &Program, block: usize) -> HashMap<usize, Section> {
         let Some(end) = end else {
             break;
         };
-        let shapes = simulate(&insts[i + 1..end], wave, saved);
-        out.insert(i, Section { end, shapes });
-        i = end + 1;
+        // a lane read at a constant lane of a VGPR value the section wrote
+        let lane_read = |j: usize| {
+            let Some(x) = insts.get(j) else { return false };
+            let Fields::Valu(v) = &x.fields else { return false };
+            let lane = match v.src.get(1) {
+                Some(&Operand::Const(c)) => crate::resource::inline(c).is_some(),
+                Some(Operand::Literal(_)) => true,
+                _ => false,
+            };
+            let made = match v.src.first() {
+                Some(&Operand::Vector { reg, .. }) => x
+                    .read(Reg::V(reg))
+                    .is_some_and(|r| insts[i + 1..end].iter().any(|w| w.writes.iter().any(|&(_, y)| y == r))),
+                _ => false,
+            };
+            x.name() == "v_readlane_b32" && matches!(v.dst, Some(Operand::Scalar { .. })) && made && lane
+        };
+        let mut after = end + 1;
+        while lane_read(after) {
+            after += 1;
+        }
+        let shapes = if after > end + 1 {
+            let steps: Vec<Inst> = insts[i + 1..end].iter().chain(&insts[end + 1..after]).cloned().collect();
+            simulate(&steps, wave, saved, end - (i + 1))
+        } else {
+            simulate(&insts[i + 1..end], wave, saved, usize::MAX)
+        };
+        out.insert(i, Section { end, after, shapes });
+        i = after;
     }
     out
 }
@@ -268,7 +306,9 @@ fn combine(op: Op, a: Sym, b: Sym) -> Sym {
     }
 }
 
-fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
+/// `after`: from this step on, the lane reads past the restore ([`Section::after`]), which take
+/// only what the section computed (a lane's own value of something from before is not known).
+fn simulate(insts: &[Inst], wave: u32, saved: Value, after: usize) -> HashMap<Value, Shape> {
     let all = if wave == 64 {
         u64::MAX
     } else {
@@ -279,7 +319,7 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
     let mut uni: HashMap<Value, Sym> = HashMap::new();
     // Masks the section derives from the saved EXEC (`s_and` with it).
     let mut masked = vec![saved];
-    for inst in insts {
+    for (step, inst) in insts.iter().enumerate() {
         let name = inst.name();
         if inst.write(Reg::S(EXEC)).is_some() {
             // Constant lane sets (prefix sums); anything else ends what
@@ -381,6 +421,7 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
                 let s = l
                     .and_then(|l| x.get(l as usize).copied())
                     .unwrap_or(Sym::Unknown);
+                let s = if step >= after && matches!(s, Sym::Own(_)) { Sym::Unknown } else { s };
                 uni.insert(w, s);
             }
             continue;
@@ -1119,6 +1160,45 @@ mod tests {
         // lanes two apart first, neighbours second: every lane counted once, but
         // (x0 + x2) + (x1 + x3) rounds differently from (x0 + x1) + (x2 + x3)
         let (found, _) = shape(&words(quads, pairs));
+        assert_eq!(found, None);
+    }
+
+    /// The wave64 OR as the FidelityFX upscaler's programs end (17af85f170e66f30, 0x6530-0x6578):
+    /// lane 0's half ORed into every lane inside the section, then lane 63 read after EXEC is
+    /// restored. A lane read ignores EXEC, so it reads the section's result. With lane 32
+    /// instead of 0 inside, lane 63 holds its own half only: no shape.
+    #[test]
+    fn a_lane_read_after_the_restore_reads_what_the_section_left() {
+        let words = |inside: u32, after: u32| {
+            let mut w = WAVE_OR_V7_TO_S7[..15].to_vec();
+            w.extend_from_slice(&[
+                inside,      // v_readlane_b32 s7, v1, <inside>
+                0x3802_0207, // v_or_b32 v1, s7, v1
+                0xBEFE_0404, // s_mov_b64 exec, s[4:5]
+                0xD760_0006,
+                after, // v_readlane_b32 s6, v1, <after>
+                0x8706_0706, // s_and_b32 s6, s6, s7
+            ]);
+            w
+        };
+        let shape = |w: &[u32]| {
+            let p = build(w, true);
+            let insts = &p.blocks[0].insts;
+            let saved = insts[0].write(Reg::S(4)).unwrap();
+            let v7 = p.inputs.iter().find_map(|&(r, v)| (r == Reg::V(7)).then_some(v)).unwrap();
+            let read = insts.iter().position(|i| i.name() == "v_readlane_b32" && i.write(Reg::S(6)).is_some()).unwrap();
+            let total = insts[read].write(Reg::S(6)).unwrap();
+            let secs = sections(&p, 0);
+            let sec = &secs[&0];
+            assert_eq!((sec.end, sec.after), (read - 1, read + 1));
+            assert!(sec.holds(0, read) && !sec.holds(0, sec.end) && !sec.holds(0, read + 1));
+            (sec.shapes.get(&total).copied(), Shape::Active(Op::Or, v7, saved, 0))
+        };
+        // lane 0, then lane 63 after the restore
+        let (found, want) = shape(&words(0x0001_0101, 0x0001_7F01));
+        assert_eq!(found, Some(want));
+        // lane 32 inside: lane 63 holds the upper half's OR only
+        let (found, _) = shape(&words(0x0001_4101, 0x0001_7F01));
         assert_eq!(found, None);
     }
 

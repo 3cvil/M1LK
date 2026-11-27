@@ -363,10 +363,7 @@ pub struct UserData {
 /// shader container.
 pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
-    let dxil = c
-        .part(FourCC::DXIL)
-        .ok_or(ShaderError::Malformed("no DXIL part"))?;
-    let native = crate::native_programs(dxil.data)?
+    let native = crate::container_programs(&c)?
         .into_iter()
         .find(|p| {
             matches!(
@@ -388,10 +385,14 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     emit(&c, &native, &p, &st, &io, &res)
 }
 
-/// The RT-off renderer can use a diffuse light floor in the tiled material pass.
+/// The RT-off renderer can use a diffuse light floor in the tiled material
+/// pass. Off unless `VICTORY_AMBIENT_FALLBACK=1` (with rays off): it only
+/// reaches the tiled material shaders with a base-colour view, lit pixels
+/// are brightened with the unlit ones, and it stacks with the probe
+/// stand-in (`victory-gpu`'s `ambient`, which is the default).
 pub fn ambient_fallback_enabled() -> bool {
     std::env::var_os("VICTORY_RAY_TRACING").is_some_and(|v| v == "0")
-        && std::env::var_os("VICTORY_AMBIENT_FALLBACK").is_none_or(|v| v != "0")
+        && std::env::var_os("VICTORY_AMBIENT_FALLBACK").is_some_and(|v| v == "1")
 }
 
 fn tiled_ambient(c: &Container, native: &NativeProgram) -> bool {

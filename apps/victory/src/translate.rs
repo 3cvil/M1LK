@@ -11,7 +11,7 @@ use victory_shader::emit::host::{self, Host};
 use victory_shader::emit::{self, validator::Validator};
 use victory_shader::structure::{self, Atom, LaneExit};
 use victory_shader::{
-    Container, FourCC, HwStage, NativeProgram, RootType, ShaderError, ir, native_programs,
+    Container, FourCC, HwStage, NativeProgram, RootType, ShaderError, ir,
 };
 use victory_shader::{io, resource};
 
@@ -411,7 +411,7 @@ pub fn warm(paths: Vec<PathBuf>, jobs: Option<usize>, pipelines: bool, rays: cra
                         let Ok(bytes) = next else { break };
                         let Ok(container) = Container::parse(&bytes) else { continue };
                         let Some(dxil) = container.part(FourCC::DXIL).map(|p| p.data) else { continue };
-                        let Ok(programs) = native_programs(dxil) else { continue };
+                        let Ok(programs) = victory_shader::native_programs(dxil) else { continue };
                         let stage = programs.iter().find_map(|p| match p.stage {
                             HwStage::Vs => Some("vertex"),
                             HwStage::Ps => Some("pixel"),
@@ -497,7 +497,11 @@ fn translate(
     let Ok(container) = Container::parse(&bytes) else {
         return t.fail("no DXIL part (SM5 or older)".into(), example);
     };
-    let Some(dxil) = container.part(FourCC::DXIL).map(|p| p.data) else {
+    let Some(dxil) = container
+        .part(FourCC::DXIL)
+        .or_else(|| container.part(FourCC::ACCC))
+        .map(|p| p.data)
+    else {
         return t.fail("no DXIL part (SM5 or older)".into(), example);
     };
     // `~`: the hash of the code alone; containers that differ only around
@@ -530,7 +534,7 @@ fn translate(
         }
         return;
     }
-    let programs = match native_programs(dxil) {
+    let programs = match victory_shader::container_programs(&container) {
         Ok(p) => p,
         Err(e) => return t.fail(e.to_string(), example),
     };

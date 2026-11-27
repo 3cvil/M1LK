@@ -400,6 +400,11 @@ fn all_lane_blocks(st: &Structured) -> Option<Vec<bool>> {
 /// not post-dominate it, which only some lanes run. Not the branches the wave takes together
 /// ([`Structured::wide`]), nor those on scalar conditions. None with an indirect exit.
 fn lane_regions(st: &Structured) -> Option<Vec<(usize, Vec<bool>)>> {
+    lane_regions_but(st, |_| false)
+}
+
+/// [`lane_regions`] without the branches `together` says every arriving lane takes the same way.
+fn lane_regions_but(st: &Structured, together: impl Fn(usize) -> bool) -> Option<Vec<(usize, Vec<bool>)>> {
     let n = st.exits.len();
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (b, e) in st.exits.iter().enumerate() {
@@ -440,7 +445,7 @@ fn lane_regions(st: &Structured) -> Option<Vec<(usize, Vec<bool>)>> {
     let mut regions = Vec::new();
     for (d, e) in st.exits.iter().enumerate() {
         let LaneExit::Branch { when, .. } = *e else { continue };
-        if st.wide.contains(&d) || st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_))) {
+        if st.wide.contains(&d) || st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_))) || together(d) {
             continue; // a wave-wide or uniform branch: all lanes go the same way
         }
         // blocks reachable from the lane branch that do not post-dominate it; and the branch's
@@ -698,6 +703,198 @@ fn wave_tid(p: &Program, x: &Parts<'_>) -> Option<Value> {
         .map(|(_, v)| *v)
 }
 
+/// [`all_lane_blocks`] for a group of one console wave64 (33..64 threads), counting also the
+/// per-lane branches whose condition every lane of the wave computes alike: the wave takes them
+/// together, so the blocks they guard are run by every lane (both host waves meet there).
+///
+/// The FidelityFX upscaler's programs wait on per-chunk flags in a range the wave computes from
+/// its first thread, `v0 - v_mbcnt(-1)` (0x40-0x170 in 17af85f170e66f30): `v_cmpx exec` on
+/// that range enters the wait, a loop over chunks steps the range by 64 with `v_cmpx` again, and
+/// inside, "some lane still reads busy" (`s_and_b64 ..., exec` read by `s_cselect`) decides
+/// the spin. Each lane checks other flags than the data it reads afterwards, so the halves must
+/// decide together; every one of the wave's lanes runs that block, so they can.
+///
+/// Facts (a greatest fixpoint, so loop-carried values such as the stepped range count):
+/// - a VGPR value is uniform when it is written in a block every lane runs (`all` here), by a
+///   plain VALU instruction under no guard, from uniform operands (scalars that are not lane
+///   masks, constants, uniform VGPRs, lane masks that compares of uniform values wrote); a VGPR
+///   phi when its block and every predecessor are such blocks and every argument is uniform.
+///   (A block every lane runs is run by all of them together, so no lane holds a value of
+///   another pass through it.)
+/// - `tid.x` (with a group width a multiple of 64, so `tid.x & 63` is the console lane) and
+///   `v_mbcnt_hi(-1, v_mbcnt_lo(-1, uniform))` are "uniform plus the lane"; so is such a value
+///   plus or minus a uniform one; the difference of two is uniform (wrapping arithmetic).
+/// - a branch is taken together when every atom of its condition is SCC or the compare bit of
+///   a VALU compare (`v_cmpx` too: the atom is the bit before EXEC) of uniform operands.
+/// - a block lies in no other branch's region ([`lane_regions_but`]).
+///
+/// The facts hold by induction over the execution: every lane enters at the entry; while every
+/// branch it reaches is taken together, all lanes stay together, so each uniform value is
+/// computed by all of them at once from equal operands.
+fn same_way_blocks(p: &Program, st: &Structured, tid_x: bool, all: &[bool]) -> Vec<bool> {
+    let n = st.exits.len();
+    let is_mask = |v: Value| st.masks.contains_key(&v) || st.highs.contains_key(&v);
+    let constant = |op: &Operand| match *op {
+        Operand::Const(c) => crate::resource::inline(c).is_some(),
+        Operand::Literal(_) => true,
+        Operand::Scalar { code, .. } => code == NULL,
+        _ => false,
+    };
+    let all_ones = |op: &Operand| match *op {
+        Operand::Const(c) => crate::resource::inline(c) == Some(u32::MAX),
+        Operand::Literal(x) => x == u32::MAX,
+        _ => false,
+    };
+    let plain = |inst: &Inst| match &inst.fields {
+        Fields::Valu(v) => {
+            v.dpp.is_none()
+                && v.sdwa.is_none()
+                && !v.clamp
+                && v.omod == 0
+                && v.neg == 0
+                && v.abs == 0
+                && !inst.name().starts_with("v_mbcnt")
+                && !inst.name().contains("lane")
+        }
+        _ => false,
+    };
+    let vreg = |inst: &Inst, op: &Operand| match *op {
+        Operand::Vector { reg, .. } => inst.read(Reg::V(reg)),
+        _ => None,
+    };
+    let order = crate::ir::reverse_postorder(&p.blocks);
+    // "uniform plus the lane", in blocks every lane runs (`all` is the plain [`all_lane_blocks`])
+    let mut lane: HashSet<Value> = HashSet::new();
+    let mut low: HashSet<Value> = HashSet::new(); // v_mbcnt_lo(-1, uniform scalar)
+    if tid_x && let Some(&(_, v)) = p.inputs.iter().find(|(r, _)| *r == Reg::V(0)) {
+        lane.insert(v);
+    }
+    let scalar = |inst: &Inst, op: &Operand| match *op {
+        Operand::Scalar { code, .. } if code != NULL => {
+            code != 126 && code != 127 && inst.read(Reg::S(code)).is_none_or(|x| !is_mask(x))
+        }
+        _ => constant(op),
+    };
+    for &b in &order {
+        if !all.get(b).copied().unwrap_or(false) {
+            continue;
+        }
+        for (i, inst) in p.blocks[b].insts.iter().enumerate() {
+            let Fields::Valu(v) = &inst.fields else { continue };
+            if st.guards[b][i].is_some() || v.dpp.is_some() || v.sdwa.is_some() || v.clamp || v.omod != 0 || v.neg != 0 || v.abs != 0 {
+                continue;
+            }
+            let Some(Operand::Vector { reg: dst, .. }) = v.dst else { continue };
+            let Some(out) = inst.write(Reg::V(dst)) else { continue };
+            let lp = |k: usize| v.src.get(k).and_then(|op| vreg(inst, op)).is_some_and(|x| lane.contains(&x));
+            let q = |k: usize| v.src.get(k).is_some_and(|op| scalar(inst, op));
+            let s = v.src.len();
+            let yes = match inst.name() {
+                "v_mbcnt_lo_u32_b32" => {
+                    if s == 2 && v.src.first().is_some_and(all_ones) && q(1) {
+                        low.insert(out);
+                    }
+                    false
+                }
+                "v_mbcnt_hi_u32_b32" => {
+                    s == 2
+                        && v.src.first().is_some_and(all_ones)
+                        && vreg(inst, &v.src[1]).is_some_and(|x| low.contains(&x))
+                }
+                "v_add_nc_u32" | "v_add_u32" => s == 2 && (lp(0) && q(1) || q(0) && lp(1)),
+                "v_sub_nc_u32" | "v_sub_u32" => s == 2 && lp(0) && q(1),
+                "v_subrev_nc_u32" | "v_subrev_u32" => s == 2 && q(0) && lp(1),
+                "v_lshl_add_u32" => s == 3 && q(0) && q(1) && lp(2),
+                "v_mov_b32" => s == 1 && lp(0),
+                _ => false,
+            };
+            if yes {
+                lane.insert(out);
+            }
+        }
+    }
+    // greatest fixpoint: start from every candidate and drop what is not justified
+    let mut uni: HashSet<Value> = HashSet::new();
+    let mut bits: HashSet<Value> = HashSet::new(); // `v_cmpx` compare bits (their EXEC writes)
+    for blk in &p.blocks {
+        uni.extend(blk.phis.iter().filter(|phi| matches!(phi.reg, Reg::V(_))).map(|phi| phi.value));
+        for inst in &blk.insts {
+            if inst.name().starts_with("v_cmpx") {
+                bits.extend(inst.writes.iter().filter(|w| matches!(w.0, Reg::S(c) if c == EXEC || c == EXEC + 1)).map(|w| w.1));
+            } else if plain(inst) {
+                uni.extend(inst.writes.iter().filter(|w| w.0 != Reg::Scc).map(|w| w.1));
+            }
+        }
+    }
+    loop {
+        let together = |d: usize| {
+            let LaneExit::Branch { when, .. } = st.exits[d] else { return true };
+            st.bools.support(when).iter().all(|a| match a {
+                Atom::Uniform(_) => true,
+                Atom::Lane(v) => uni.contains(v) || bits.contains(v),
+                _ => false,
+            })
+        };
+        let mut here = vec![true; n];
+        let Some(regions) = lane_regions_but(st, together) else { return all.to_vec() };
+        for (_, region) in regions {
+            for b in (0..n).filter(|&b| region[b]) {
+                here[b] = false;
+            }
+        }
+        let before = (uni.len(), bits.len());
+        for &b in &order {
+            let blk = &p.blocks[b];
+            let whole = here[b] && blk.preds.iter().all(|&q| here.get(q).copied().unwrap_or(false));
+            for phi in &blk.phis {
+                if uni.contains(&phi.value) && !(whole && phi.args.iter().all(|a| uni.contains(a))) {
+                    uni.remove(&phi.value);
+                }
+            }
+            for (i, inst) in blk.insts.iter().enumerate() {
+                let Fields::Valu(v) = &inst.fields else { continue };
+                let cmpx = inst.name().starts_with("v_cmpx");
+                if !cmpx && !plain(inst) {
+                    continue;
+                }
+                let alike = |op: &Operand| match *op {
+                    Operand::Vector { reg, dwords } => (0..dwords.max(1)).all(|k| {
+                        // (its own dwords: not the old value a write keeps in other lanes)
+                        inst.read(Reg::V(reg.wrapping_add(k))).is_some_and(|x| uni.contains(&x))
+                    }),
+                    Operand::Scalar { code, .. } if code != NULL => {
+                        code != 126 && code != 127 && inst.read(Reg::S(code)).is_none_or(|x| !is_mask(x) || uni.contains(&x))
+                    }
+                    _ => constant(op),
+                };
+                // (uniform plus the lane) - (uniform plus the lane)
+                let lp = |k: usize| v.src.get(k).and_then(|op| vreg(inst, op)).is_some_and(|x| lane.contains(&x));
+                let difference = matches!(inst.name(), "v_sub_nc_u32" | "v_sub_u32" | "v_subrev_nc_u32" | "v_subrev_u32")
+                    && v.src.len() == 2
+                    && lp(0)
+                    && lp(1);
+                let ok = here[b] && (difference || v.src.iter().all(alike));
+                if cmpx {
+                    // the compare bit only: lanes outside EXEC keep their bit clear, which the
+                    // branch condition holds apart
+                    if !ok {
+                        for w in &inst.writes {
+                            bits.remove(&w.1);
+                        }
+                    }
+                } else if !ok || st.guards[b][i].is_some() {
+                    for w in &inst.writes {
+                        uni.remove(&w.1);
+                    }
+                }
+            }
+        }
+        if (uni.len(), bits.len()) == before {
+            return here.iter().zip(all).map(|(&h, &a)| h || a).collect();
+        }
+    }
+}
+
 /// What a register value holds, for [`wave_local`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wave {
@@ -912,7 +1109,7 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
             }
             for (i, inst) in block.insts.iter().enumerate() {
                 // inside a whole-wave section: what the simulation found each value to be
-                if let Some((_, sec)) = sections[b].iter().find(|(s, sec)| i > **s && i < sec.end) {
+                if let Some((_, sec)) = sections[b].iter().find(|(s, sec)| sec.holds(**s, i)) {
                     for &(_, w) in &inst.writes {
                         let k = match sec.shapes.get(&w) {
                             None => Wave::Mixed,
@@ -1867,6 +2064,15 @@ impl<'a> Lower<'a> {
                                 // lanes 32..63 are the other host wave: masks, lane reads and lane
                                 // numbers go through two exchange dwords past the program's LDS
                                 // (local waves never touch the exchange slots, so allocate none).
+                                // A group of one console wave meets also where the wave takes
+                                // every branch around together (a group barrier needs the whole
+                                // group, which several console waves need not be together).
+                                let all = if group > 32 && group <= 64 {
+                                    let tid_x = cs.threads[0] % 64 == 0 && cs.thread_id_vgprs() >= 1;
+                                    same_way_blocks(p, x.st, tid_x, &all)
+                                } else {
+                                    all
+                                };
                                 let extra = if LOCAL_WAVES.get() { 0 } else { 2 * group.div_ceil(64) };
                                 if s.lds_dwords + extra <= 8192 {
                                     exchange = Some((s.lds_dwords, group <= 32, all));
@@ -2294,9 +2500,9 @@ impl<'a> Lower<'a> {
         for b in 0..p.blocks.len() {
             let found = super::wave::sections(p, b);
             for (&start, sec) in &found {
-                for i in start + 1..sec.end {
+                for i in (start + 1..sec.after).filter(|&i| sec.holds(start, i)) {
                     for &(_, w) in &p.blocks[b].insts[i].writes {
-                        inside.insert(w, (b, start, sec.end));
+                        inside.insert(w, (b, start, sec.after));
                     }
                 }
             }
@@ -2794,11 +3000,16 @@ impl<'a> Lower<'a> {
             let mut i = 0;
             while i < p.blocks[b].insts.len() {
                 self.inst(b, i)?;
-                if let Some(end) = self.sections.get(&b).and_then(|s| s.get(&i)).map(|s| s.end) {
+                if let Some((end, after)) = self.sections.get(&b).and_then(|s| s.get(&i)).map(|s| (s.end, s.after)) {
                     for j in i + 1..end {
                         self.section_inst(b, j, i);
                     }
-                    i = end;
+                    // the restore, then the lane reads after it (from the simulation)
+                    self.inst(b, end)?;
+                    for j in end + 1..after {
+                        self.section_inst(b, j, i);
+                    }
+                    i = after;
                     continue;
                 }
                 i += 1;

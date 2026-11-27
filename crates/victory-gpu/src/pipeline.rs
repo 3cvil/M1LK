@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::mem::offset_of;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::object::{self, E_INVALIDARG, HRESULT, Iid, Object, PIPELINE, Table, This, guid};
+use crate::object::{self, E_INVALIDARG, E_NOTIMPL, HRESULT, Iid, Object, PIPELINE, Table, This, guid};
 use crate::resource::PAGEABLE_IIDS;
 
 const PIPELINE_IIDS: [Iid; 4] = [
@@ -64,6 +64,10 @@ pub(crate) struct Shader {
     /// A hair-strand program, left out ([`hair_strands`]).
     #[cfg(windows)]
     hair: bool,
+    /// What it is to the stand-in for the indirect light
+    /// ([`crate::ambient`]), by its hash.
+    #[cfg(windows)]
+    pub(crate) ambient: Option<crate::ambient::Role>,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
     #[cfg(windows)]
@@ -145,9 +149,12 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
         .or_insert_with(|| {
             KEPT[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             KEPT[1].fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            let hash = full.to_hex()[..16].to_owned();
             Arc::new(Shader {
                 stage,
-                hash: full.to_hex()[..16].to_owned(),
+                #[cfg(windows)]
+                ambient: crate::ambient::role(&hash).or_else(|| crate::ambient::role_by_name(bytes)),
+                hash,
                 container: bytes.to_vec(),
                 #[cfg(windows)]
                 hair: hair_strands(bytes),
@@ -183,6 +190,7 @@ pub fn warm_selected(stage: &'static str, container: &[u8], compute: bool) -> Op
         hash: full.to_hex()[..16].to_owned(),
         container: container.to_vec(),
         hair: false,
+        ambient: None,
         translated: OnceLock::new(),
         ray_work: OnceLock::new(),
     });
@@ -261,14 +269,11 @@ impl Shader {
 
 #[cfg(windows)]
 fn translate(container: &[u8]) -> Result<Translated, String> {
-    use victory_shader::{Container, FourCC, HwStage};
+    use victory_shader::{Container, HwStage};
     // The translation depends on it (a view index past a capped heap).
     crate::descriptor::host::probe_view_limit();
     let c = Container::parse(container).map_err(|e| e.to_string())?;
-    let programs = match c.part(FourCC::DXIL) {
-        Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
-        None => Vec::new(),
-    };
+    let programs = victory_shader::container_programs(&c).unwrap_or_default();
     let host = crate::shader_cache::host_shader(container)?;
     let stores = programs.is_empty() || programs.iter().any(stores);
     let compute_threads = programs.iter().find_map(|p| match &p.io {
@@ -395,6 +400,25 @@ pub(crate) fn builder_off(why: &'static str) {
         b.off = true;
         tracing::warn!(why, "the ray-tracing structure builder is turned off for the rest of the run: its stages run all or none");
     }
+}
+
+/// Whether ray tracing is off for this run (`--no-rt`, `VICTORY_RAY_TRACING=0`).
+#[cfg(windows)]
+pub(crate) fn rays_off() -> bool {
+    ray_tracing::policy().rays_off()
+}
+
+/// Whether ray tracing is forced on (`--rt`, `VICTORY_RAY_TRACING=1`).
+#[cfg(windows)]
+pub(crate) fn rays_forced_on() -> bool {
+    ray_tracing::policy().builder
+}
+
+/// Whether one of the title's pipeline `this`'s shaders has `role` to the
+/// stand-in for the indirect light ([`crate::ambient`]).
+#[cfg(windows)]
+pub(crate) fn has_ambient_role(this: This, role: crate::ambient::Role) -> bool {
+    !this.is_null() && pipeline(this).shaders.iter().any(|s| s.ambient == Some(role))
 }
 
 /// At a dispatch of a builder pipeline: whether the builder runs (see
@@ -738,8 +762,25 @@ pub(crate) extern "system" fn create_compute(
     let Some(desc) = (unsafe { desc.as_ref() }) else {
         return E_INVALIDARG;
     };
+    let shader = copy("compute", &desc.stage);
+    // A container of another compiler's code only (`ACCC`: the title's
+    // upscaler passes) does not run here: the title is told, and does
+    // without (`VICTORY_ACCC=1` takes them, their dispatches are dropped).
+    #[cfg(windows)]
+    if let Some(s) = &shader
+        && victory_shader::Container::parse(&s.container)
+            .is_ok_and(|c| c.part(victory_shader::FourCC::DXIL).is_none())
+        && std::env::var("VICTORY_ACCC").as_deref() == Ok("0")
+    {
+        tracing::warn!(hash = %s.hash, "a compute pipeline without DXIL is not made");
+        if !out.is_null() {
+            // SAFETY: the title's out pointer.
+            unsafe { *out = std::ptr::null() };
+        }
+        return E_NOTIMPL;
+    }
     hand_out(
-        copy("compute", &desc.stage).into_iter().collect(),
+        shader.into_iter().collect(),
         #[cfg(windows)]
         None,
         iid,

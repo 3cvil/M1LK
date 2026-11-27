@@ -489,6 +489,108 @@ fn wave_lanes() -> Option<u32> {
     Some(options.WaveLaneCountMin)
 }
 
+/// The FidelityFX upscaler's wait (17af85f170e66f30, 0x40-0x22c), on a group of one console
+/// wave64: `v_cmpx exec` on a range computed from the wave's first thread, `v0 - v_mbcnt(-1)`
+/// (here plus s0: entered when s0 is not 0), then a loop "while some lane still sees busy (its
+/// thread below s1) and fewer than s2 tries" on SCC of `s_and_b64 ..., exec` read by
+/// `s_cselect`. Every lane stores the number of tries. On the console the wave decides
+/// together: s2 tries once any lane is busy, whichever half it is in; one try with none.
+fn the_wait(entry: u32) -> NativeProgram {
+    native(&[
+        0xD765_0001,
+        0x0001_00C1, // v_mbcnt_lo_u32_b32 v1, -1, 0
+        0xD766_0001,
+        0x0002_02C1, // v_mbcnt_hi_u32_b32 v1, -1, v1
+        0x4C04_0300, // v_sub_nc_u32 v2, v0, v1: the wave's first thread (0)
+        0x4A04_0400, // v_add_nc_u32 v2, s0, v2
+        entry,       // v_cmpx_ne_u32 exec, 0, v2 (or another entry)
+        0xBF88_000D, // s_cbranch_execz to the end
+        0xBE90_0380, // s_mov_b32 s16, 0
+        0x7D88_0001, // head: v_cmp_gt_u32 vcc, s1, v0 (busy)
+        0x8794_7E6A, // s_and_b64 s[20:21], vcc, exec
+        0x8594_80C1, // s_cselect_b64 s[20:21], -1, 0
+        0x8010_8110, // s_add_u32 s16, s16, 1
+        0xBF09_0210, // s_cmp_ge_u32 s16, s2
+        0x8596_80C1, // s_cselect_b64 s[22:23], -1, 0
+        0x8B94_1416, // s_orn2_b64 s[20:21], s[22:23], s[20:21]
+        0xBF84_FFF8, // s_cbranch_scc0 head
+        0x7E08_0210, // v_mov_b32 v4, s16
+        0x340A_0082, // v_lshlrev_b32 v5, 2, v0
+        0xE070_1000,
+        0x8002_0405, // buffer_store_dword v4, v5, s[8:11], 0 offen
+    ])
+}
+
+/// [`the_wait`] on the hardware device with s0..s2: what each of the 64 threads stored.
+fn the_wait_on_the_card(shader: &HostShader, constants: [u32; 3]) -> Option<Vec<u32>> {
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return None;
+    };
+    let Ok((root, pso)) = host.compute_pipeline(shader) else {
+        eprintln!("the hardware device does not take this program; not run");
+        return None;
+    };
+    let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+    for u in &shader.user_data {
+        if let (RootType::Constants, 0, d @ 0..=2) = (u.root, u.slot, u.dword) {
+            ud[u.index as usize] = constants[d as usize];
+        }
+    }
+    let out = host
+        .dispatch(
+            &root,
+            &pso,
+            &Dispatch {
+                roots: vec![(0, Root::Constants(ud))],
+                views: &[View::RawUav(64)],
+                samplers: &[],
+                groups: [1, 1, 1],
+            },
+        )
+        .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+    Some(out[0][..64].to_vec())
+}
+
+#[test]
+fn a_wait_the_wave_enters_together_exchanges_inside_its_lane_branch() {
+    let native = the_wait(0x7DAA_0480);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    // the entry is a per-lane branch to the structuriser; the lowering finds that every lane
+    // computes its condition alike
+    let st = structure::structure(&p).expect("structure");
+    let entry = (0..p.blocks.len())
+        .find(|&b| p.blocks[b].insts.last().is_some_and(|i| i.name() == "s_cbranch_execz"))
+        .expect("the entry");
+    assert!(!st.wide.contains(&entry));
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // (s0: entered unless 0; s1: threads below it busy; s2: the limit of tries)
+    for (s, tries) in [([1u32, 0, 9], 1u32), ([1, 10, 5], 5), ([1, 40, 3], 3), ([1, 64, 7], 7), ([0, 10, 5], 0)] {
+        let Some(got) = the_wait_on_the_card(&shader, s) else { return };
+        assert!(got.iter().all(|&g| g == tries), "s0..s2 {s:?}: got {got:?}, the console's {tries} in every lane");
+    }
+    eprintln!("ran on the hardware device: the console's number of tries in both halves");
+}
+
+/// [`the_wait`] entered on a lane's own thread number (`v_cmpx_ne_u32 exec, 0, v0`): the
+/// lanes go their own ways, and the halves cannot meet inside.
+#[test]
+fn a_wait_entered_per_lane_is_still_refused() {
+    let native = the_wait(0x7DAA_0080);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let per_lane = lowered(&native, &p, &HashSet::new());
+    assert!(
+        matches!(&per_lane, Err(ShaderError::Unsupported { what, .. }) if *what == "a lane mask exchanged where not every lane runs"),
+        "{:?}",
+        per_lane.err()
+    );
+}
+
 /// A 32-lane console wave. A register holds a lane mask on one path (the lanes below s0)
 /// and a number on the other, and is read as a number after the join, as the trace programs
 /// keep their lanes' masks and their node numbers on one stack

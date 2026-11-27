@@ -432,6 +432,145 @@ pub fn native_programs(part: &[u8]) -> Result<Vec<NativeProgram>, ShaderError> {
     Ok(out)
 }
 
+/// The native programs of a container: in its `DXIL` part, or the one of
+/// its `ACCC` part.
+pub fn container_programs(c: &crate::Container) -> Result<Vec<NativeProgram>, ShaderError> {
+    use crate::FourCC;
+    if let Some(part) = c.part(FourCC::DXIL) {
+        return native_programs(part.data);
+    }
+    match c.part(FourCC::ACCC) {
+        Some(part) => {
+            let root = c.part(FourCC::RTS0).map_or(&[][..], |p| p.data);
+            Ok(vec![accc_program(part.data, root)?])
+        }
+        None => Err(Malformed("no DXIL part")),
+    }
+}
+
+/// The compute program of an `ACCC` part (AMD's ACO compiler: the title's
+/// upscaler passes), as observed:
+///
+/// ```text
+/// +0x00 "FSPX"  u32 version (1), u32 chunk count, u32 size, then per chunk:
+///               u32 kind, u32 offset, u32 size, u32 0
+/// kind 0        u32 x3, u16 x3 thread-group size, u16 flags (0x10 wave32),
+///               u32 COMPUTE_PGM_RSRC1, u32 COMPUTE_PGM_RSRC2
+/// kind 6        the code
+/// kind 7        u32 x6, then entries of u32 x8; those starting with 0x41
+///               hold a used resource as in `FSSM` (20 bytes) after it
+/// ```
+///
+/// The root signature's parameters arrive in user SGPRs from s4 on.
+fn accc_program(part: &[u8], root: &[u8]) -> Result<NativeProgram, ShaderError> {
+    if part.get(0..4) != Some(b"FSPX") || u32_at(part, 4)? != 1 {
+        return Err(Malformed("an unknown ACCC part"));
+    }
+    let count = u32_at(part, 8)? as usize;
+    if count > MAX_XDAT_ENTRIES {
+        return Err(Malformed("implausible ACCC chunk count"));
+    }
+    let chunk = |kind: u32| -> Result<&[u8], ShaderError> {
+        for i in 0..count {
+            let at = 0x10 + 16 * i;
+            if u32_at(part, at)? == kind {
+                let (offset, size) = (u32_at(part, at + 4)?, u32_at(part, at + 8)?);
+                return bytes(part, offset.into(), size.into())
+                    .ok_or(Malformed("ACCC chunk out of bounds"));
+            }
+        }
+        Err(Malformed("an ACCC chunk is missing"))
+    };
+    let head = chunk(0)?;
+    let (xy, z) = (u32_at(head, 12)?, u32_at(head, 16)?);
+    let wave64 = z >> 16 & 0x10 == 0;
+    let (rsrc1, rsrc2) = (u32_at(head, 20)?, u32_at(head, 24)?);
+    let vgprs = ((rsrc1 & 0x3f) + 1) * if wave64 { 4 } else { 8 };
+    if vgprs > 256 {
+        return Err(Malformed("implausible VGPR count"));
+    }
+    let used: Vec<UsedResource> = chunk(7)?
+        .get(24..)
+        .unwrap_or(&[])
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .take_while(|e| le32(&e[..], 0) == 0x41)
+        .map(|e| {
+            let e = &e[4..24];
+            let dwords = e[16];
+            UsedResource {
+                kind: match e[0] {
+                    0 => ResourceType::Srv,
+                    1 => ResourceType::Sampler,
+                    2 => ResourceType::Cbv,
+                    3 => ResourceType::Uav,
+                    n => ResourceType::Other(n),
+                },
+                root: RootType::from_raw(e[1].into()),
+                table_offset_dwords: le32(e, 4),
+                lower_bound: le32(e, 8),
+                // Not a stride here: 1 for raw buffers, 4 for textures.
+                stride: 0,
+                dwords,
+                user_data: e[17],
+                slot: e[18],
+            }
+        })
+        .collect();
+    // The serialized root signature's parameters (type, visibility, offset).
+    const FIRST: u32 = 4;
+    /// The scalar registers a wave has.
+    const SGPRS: u32 = 106;
+    let mut layout = Vec::new();
+    let mut next = FIRST;
+    let params = if root.is_empty() { 0 } else { u32_at(root, 4)? };
+    if params > 64 {
+        return Err(Malformed("implausible root parameter count"));
+    }
+    for slot in 0..params as usize {
+        let at = u32_at(root, 8)? as usize + 12 * slot;
+        let sgprs = match u32_at(root, at)? {
+            0 => 1,
+            1 => u32_at(root, u32_at(root, at + 8)? as usize + 8)?,
+            _ => 2,
+        };
+        let user_data = u8::try_from(next).map_err(|_| Malformed("too many root constants"))?;
+        next += sgprs;
+        // As the code finds them: a table's entry per range it reads.
+        let read: Vec<&UsedResource> =
+            used.iter().filter(|u| u32::from(u.user_data) == u32::from(user_data)).collect();
+        let kind = match u32_at(root, at)? {
+            0 => RootType::Table,
+            1 => RootType::Constants,
+            _ => RootType::Descriptor,
+        };
+        layout.push(RootParam {
+            root: kind,
+            table_offset_dwords: 0,
+            sgprs,
+            base_register: read.first().map_or(0, |u| u.lower_bound),
+            user_data,
+            slot: slot as u8,
+        });
+    }
+    if next > SGPRS {
+        return Err(Malformed("root parameter outside the SGPRs"));
+    }
+    Ok(NativeProgram {
+        stage: HwStage::Cs,
+        wave64,
+        vgprs: vgprs as u16,
+        layout,
+        used,
+        io: StageIo::Cs(ComputeIo {
+            rsrc2,
+            threads: [xy & 0xffff, xy >> 16, z & 0xffff],
+        }),
+        code: chunk(6)?.to_vec(),
+    })
+}
+
 fn unpack(blob: &[u8]) -> Result<Vec<u8>, ShaderError> {
     if blob.get(0..4) != Some(b"XBCH") {
         return Err(Malformed("native blob lacks XBCH magic"));
@@ -720,6 +859,76 @@ fn bytes(data: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Container, FourCC};
+
+    /// An `ACCC` part: header, thread-group size, wave size, code and one
+    /// used resource, with a root signature of one table.
+    fn accc_container(wave32: bool) -> Vec<u8> {
+        let w = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+        let mut head = Vec::new();
+        for x in [0, 0, 0, 8 | 4 << 16, 1 | (u32::from(wave32) * 0x10) << 16, 0x0002_0003, 0x84] {
+            w(&mut head, x);
+        }
+        let code = [0xAA, 0xBB, 0xCC, 0xDD];
+        let mut used = vec![0; 24];
+        let mut entry = [0u8; 32];
+        entry[..4].copy_from_slice(&0x41u32.to_le_bytes());
+        entry[4] = 3; // a UAV
+        entry[5] = 3; // in a table
+        entry[8..12].copy_from_slice(&2u32.to_le_bytes());
+        entry[12..16].copy_from_slice(&7u32.to_le_bytes());
+        entry[20] = 4; // dwords
+        entry[21] = 4; // user data
+        entry[22] = 1; // slot
+        used.extend_from_slice(&entry);
+        let mut part = Vec::new();
+        for x in [u32::from_le_bytes(*b"FSPX"), 1, 3, 0] {
+            w(&mut part, x);
+        }
+        let at = 0x10 + 3 * 16;
+        let mut body = Vec::new();
+        for (kind, data) in [(0u32, &head[..]), (6, &code[..]), (7, &used[..])] {
+            for x in [kind, (at + body.len()) as u32, data.len() as u32, 0] {
+                w(&mut part, x);
+            }
+            body.extend_from_slice(data);
+        }
+        part.extend_from_slice(&body);
+        // One table parameter: type, visibility, offset.
+        let mut root = Vec::new();
+        for x in [2, 1, 12, 0, 0, 0] {
+            w(&mut root, x);
+        }
+        crate::dxbc::build(&[(FourCC::ACCC, &part), (FourCC::RTS0, &root)])
+    }
+
+    #[test]
+    fn an_accc_container_is_a_compute_program() {
+        for wave32 in [false, true] {
+            let bytes = accc_container(wave32);
+            let c = Container::parse(&bytes).unwrap();
+            let programs = container_programs(&c).unwrap();
+            let [p] = &programs[..] else { panic!("one program") };
+            assert_eq!(p.stage, HwStage::Cs);
+            assert_eq!(p.wave64, !wave32);
+            assert_eq!(p.code, [0xAA, 0xBB, 0xCC, 0xDD]);
+            assert_eq!(p.vgprs, if wave32 { 32 } else { 16 });
+            let StageIo::Cs(cs) = &p.io else { panic!("compute io") };
+            assert_eq!(cs.threads, [8, 4, 1]);
+            assert_eq!(p.layout.len(), 1);
+            assert_eq!(p.layout[0].user_data, 4);
+            assert_eq!(p.used.len(), 1);
+            assert_eq!(p.used[0].kind, ResourceType::Uav);
+            assert_eq!(p.used[0].lower_bound, 7);
+        }
+    }
+
+    #[test]
+    fn a_container_with_neither_part_is_malformed() {
+        let c = crate::dxbc::build(&[(FourCC::RTS0, &[0; 12])]);
+        let c = Container::parse(&c).unwrap();
+        assert!(container_programs(&c).is_err());
+    }
 
     const VS_CODE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     const PS_CODE: [u8; 4] = [9, 10, 11, 12];

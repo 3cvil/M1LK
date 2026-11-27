@@ -1084,6 +1084,12 @@ impl State {
         if !self.bind(list, p, false, false) {
             return false;
         }
+        // The sky the stand-in for the indirect light may follow.
+        if let Some(&sky) = self.targets.first()
+            && p.stages.iter().any(|s| s.shader.ambient == Some(crate::ambient::Role::Sky))
+        {
+            crate::ambient::sky_drawn(sky);
+        }
         let l = &list.list;
         // Vertex buffers the input layout reads.
         let mut views = [D3D12_VERTEX_BUFFER_VIEW::default(); 32];
@@ -2452,6 +2458,9 @@ impl State {
             crate::pipeline::note_why("walks the BVH before the structure builder has run whole".to_owned());
             return;
         }
+        if self.idle_without_rays() {
+            return;
+        }
         let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) else {
             once!(
                 pipeline = format_args!("{:#x}", self.pipeline),
@@ -2543,6 +2552,78 @@ impl State {
             crate::pipeline::builder_recorded(self.pipeline as This, false);
         }
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+        self.ambient(list, p);
+    }
+
+    /// Whether the bound program only serves rays that do not run and is
+    /// left out while the stand-in for their light is on
+    /// ([`crate::ambient::Role::ActivateRays`]).
+    fn idle_without_rays(&self) -> bool {
+        let idle = crate::ambient::on()
+            && crate::pipeline::has_ambient_role(self.pipeline as This, crate::ambient::Role::ActivateRays);
+        if idle {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                tracing::info!("ambient light: the program that activates the screen probes' rays is left out (no rays run)");
+            });
+        }
+        idle
+    }
+
+    /// After a dispatch of `p`: the stand-in for the indirect light, if `p`
+    /// is the program that resolves it or the reflections' last
+    /// ([`crate::ambient`]). Its pass binds a pipeline, root signature and
+    /// heap of its own: the next draw or dispatch sets the title's again.
+    fn ambient(&mut self, list: &HostList, p: &HostPipeline) {
+        use crate::ambient::Role;
+        let Some((stage, role)) = p
+            .stages
+            .first()
+            .and_then(|s| Some((s, s.shader.ambient.filter(|r| matches!(r, Role::Resolve | Role::Reflections))?)))
+        else {
+            return;
+        };
+        if !crate::ambient::on() {
+            return;
+        }
+        let view = |kind: ResourceType, (slot, offset): (u8, u32)| {
+            let u = stage.translated().used.iter().find(|u| {
+                u.kind == kind && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
+            })?;
+            let Some(&Root::Table(table)) = self.roots_ref(true).get(usize::from(u.slot)) else {
+                return None;
+            };
+            crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4)
+        };
+        let done = if role == Role::Reflections {
+            match view(ResourceType::Uav, crate::ambient::REFLECTIONS) {
+                Some(View::Unordered(r, ..)) if r != 0 => crate::ambient::hold(list, r as This),
+                _ => {
+                    once!("ambient light: the reflections' program has no image where it was seen");
+                    false
+                }
+            }
+        } else {
+            match view(ResourceType::Uav, crate::ambient::LIGHT) {
+                Some(View::Unordered(r, ..)) if r != 0 => {
+                    let depth = match view(ResourceType::Srv, crate::ambient::DEPTH) {
+                        Some(View::Shader(d, _)) if d != 0 => Some(d as This),
+                        _ => None,
+                    };
+                    crate::ambient::replace(list, r as This, depth)
+                }
+                _ => {
+                    once!("ambient light: the resolve has no light image where it was seen");
+                    false
+                }
+            }
+        };
+        if done {
+            self.host_pipeline = 0;
+            self.host_roots = [0; 2];
+            self.host_heaps = [0; 2];
+        }
     }
 
     #[cfg(feature = "diagnostics")]
@@ -3541,6 +3622,9 @@ impl State {
             crate::pipeline::note_why(format!("indirect kind {kind}: BVH walker held back"));
             return false;
         }
+        if self.idle_without_rays() {
+            return false;
+        }
         const DRAW: u32 = 0;
         const INDEXED: u32 = 1;
         const DISPATCH: u32 = 2;
@@ -3770,6 +3854,7 @@ impl State {
         crate::indirect::done(list, &bounded);
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            self.ambient(list, p);
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }

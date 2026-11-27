@@ -48,8 +48,15 @@ pub fn run(
         Ok(name) => Some(FsrPreset::from_name(name).context("Unknown FSR preset")?),
         // VICTORY_DLSS=quality|balanced|performance|ultra picks the scene scale
         // the DLSS mode wants (2/3, 1/1.7, 1/2, 1/3 of 4K); without it, or with
-        // VICTORY_FSR_4K set, FSR keeps its own presets.
-        Err(_) => match std::env::var("VICTORY_DLSS").ok().as_deref().and_then(fsr_preset::dlss_preset) {
+        // VICTORY_FSR_4K set, FSR keeps its own presets. The 4K presets need Series X;
+        // on Series S, DLSS replaces the title's own 720p -> 1080p upscale instead,
+        // so VICTORY_DLSS is not a reason to refuse the launch there.
+        Err(_) => match std::env::var("VICTORY_DLSS")
+            .ok()
+            .filter(|_| matches!(console, Console::SeriesX))
+            .as_deref()
+            .and_then(fsr_preset::dlss_preset)
+        {
             Some(preset) => Some(preset),
             None => (std::env::var("VICTORY_FSR_1440P_TO_4K").as_deref() == Ok("1"))
                 .then_some(FsrPreset::Quality),
