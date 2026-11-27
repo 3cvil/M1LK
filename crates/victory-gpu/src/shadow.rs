@@ -2840,9 +2840,14 @@ impl Shadow {
     /// shader writes.
     fn update_free(&self, from: usize, to: usize) -> usize {
         if self.watched.load(Ordering::Relaxed) != NOT_WATCHED {
-            if let Some((now, written)) = crate::watch::writes(from, to, true) {
+            let asking = crate::copyprof::start();
+            let answer = crate::watch::writes(from, to, true);
+            asking.end(crate::copyprof::Slot::Writes, to - from);
+            if let Some((now, written)) = answer {
                 self.watched.store(1, Ordering::Relaxed);
+                let walk = crate::copyprof::start();
                 let copied = self.copy_stale(from, to, now, &written);
+                walk.end(crate::copyprof::Slot::StaleWalk, copied);
                 self.refresh_check(from, to);
                 #[cfg(feature = "diagnostics")]
                 {
@@ -2858,7 +2863,9 @@ impl Shadow {
         crate::copystat::add(crate::copystat::C::WholeBytes, (to - from) as u64);
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
+        let whole = crate::copyprof::start();
         self.copy(from, to);
+        whole.end(crate::copyprof::Slot::Whole, to - from);
         #[cfg(feature = "diagnostics")]
         crate::copystat::whole(from, to - from, started.elapsed().as_micros() as u64);
         to - from
@@ -2965,10 +2972,14 @@ impl Shadow {
         let (from, to) = (from.max(start), to.min(end));
         // SAFETY: inside the mapping (`from` and `to` are within the buffer).
         let at = unsafe { self.data.add(from - start) };
+        let prof = crate::copyprof::start();
         crate::host::copy_mapped(at, from as *const u8, to - from, false);
         // After the bytes are in: a snapshot taken meanwhile is not current.
+        let notes = crate::copyprof::start();
         self.changed(from - start, to - start);
         self.card_changed(from - start, to - start);
+        notes.end(crate::copyprof::Slot::Notes, 0);
+        prof.end(crate::copyprof::Slot::Copy, to - from);
         to - from
     }
 

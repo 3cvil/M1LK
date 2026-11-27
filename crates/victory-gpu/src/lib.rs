@@ -21,6 +21,8 @@ mod ambient;
 mod capture;
 #[cfg(windows)]
 mod compose;
+#[cfg(windows)]
+mod copyprof;
 pub mod console;
 pub mod cores;
 #[cfg(all(windows, feature = "diagnostics"))]

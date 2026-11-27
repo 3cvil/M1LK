@@ -5742,7 +5742,9 @@ impl Host {
                 }
             }
             let ranges: Vec<(usize, usize)> = spans.into_values().collect();
+            let asking = crate::copyprof::start();
             crate::watch::ask_once(&ranges);
+            asking.end(crate::copyprof::Slot::AskOnce, 0);
             // Behind flights: the title wrote memory that a flight's shaders
             // may write too, and this submission refreshes it. The flights
             // are settled, and the asking made again: the copy-back wrote
@@ -7151,11 +7153,15 @@ impl HostList {
                         add(C::Copies, 1);
                         add(C::CopyBytes, len as u64);
                     }
+                    let whole = crate::copyprof::start();
                     batch.title_written();
                     crate::port::copied(dst, src, len);
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
                     // With the submission's one asking: the journal learns it.
+                    let noted = crate::copyprof::start();
                     crate::watch::wrote(dst, len);
+                    noted.end(crate::copyprof::Slot::StepWrote, len);
+                    whole.end(crate::copyprof::Slot::StepCopy, len);
                     len
                 }
                 Step::Fill(_) | Step::Fills(_) => {
@@ -7164,7 +7170,9 @@ impl HostList {
                         crate::port::filled(f.src, f.len);
                     }
                     let bytes = fills.iter().map(|f| f.len).sum::<usize>();
+                    let filling = crate::copyprof::start();
                     let jobs = run_fills(fills, fill_workers());
+                    filling.end(crate::copyprof::Slot::StepFill, bytes);
                     #[cfg(feature = "diagnostics")]
                     {
                         add(C::Copies, fills.len() as u64);
@@ -7209,10 +7217,12 @@ impl HostList {
                     // the next flush of all (flushing all of them at every
                     // range a dispatch writes made thousands of write-watch
                     // askings a frame).
+                    let gpu_write = crate::copyprof::start();
                     batch.flush_one(shadow);
                     #[cfg(feature = "diagnostics")]
                     let snapshot = std::time::Instant::now();
                     shadow.writing(*address, *len);
+                    gpu_write.end(crate::copyprof::Slot::GpuWrite, *len);
                     #[cfg(feature = "diagnostics")]
                     {
                         add(C::GpuWrites, 1);
@@ -7535,7 +7545,9 @@ impl Batch {
     /// Brings `[from, to)` of a copy up to date, timed.
     fn update(shadow: &crate::shadow::Shadow, from: usize, to: usize) {
         let started = std::time::Instant::now();
+        let prof = crate::copyprof::start();
         let copied = shadow.update(from, to - from);
+        prof.end(crate::copyprof::Slot::Update, copied);
         let us = started.elapsed().as_micros() as u64;
         #[cfg(feature = "diagnostics")]
         crate::copystat::range(from, to - from, us, 0);
@@ -7552,9 +7564,11 @@ impl Batch {
     /// Before a step that writes title memory: pending refreshes are done
     /// first, and textures are checked again after it.
     fn title_written(&mut self) {
+        let prof = crate::copyprof::start();
         self.check_textures();
         self.flush();
         self.textures.clear();
+        prof.end(crate::copyprof::Slot::TitleWritten, 0);
     }
 
     /// With [`parallel_refresh`]: runs the texture checks due on the helper
@@ -7591,8 +7605,10 @@ impl Batch {
         let ahead = self.refreshes.len() > 1;
         if ahead {
             let started = std::time::Instant::now();
+            let prof = crate::copyprof::start();
             let ranges = self.refreshes.iter().filter(|r| !r.0.unwatched()).map(|r| (r.1, r.2));
             crate::watch::ask_ahead(ranges);
+            prof.end(crate::copyprof::Slot::AskAhead, 0);
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
         // Most of a flush's copies (the heap's buffer views: thousands a
@@ -7601,9 +7617,11 @@ impl Batch {
         // is woken for them. `VICTORY_QUIET_REFRESH=0` refreshes them all.
         if crate::watch::quiet_refresh() && !self.refreshes.is_empty() {
             let started = std::time::Instant::now();
+            let prof = crate::copyprof::start();
             #[cfg(feature = "diagnostics")]
             let all = self.refreshes.len();
             self.refreshes.retain(|(shadow, from, to)| !shadow.nothing_new(*from, *to - *from));
+            prof.end(crate::copyprof::Slot::Quiet, 0);
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             QUIET_REFRESHES.fetch_add((all - self.refreshes.len()) as u64, Ordering::Relaxed);
@@ -7671,11 +7689,15 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
     }
     if title_dst {
         // The kernel writes the destination: it must not be guarded.
+        let prof = crate::copyprof::start();
         crate::watch::writing(dst as usize, len);
+        prof.end(crate::copyprof::Slot::GuardOpen, len);
     }
     #[cfg(feature = "diagnostics")]
     let moved = std::time::Instant::now();
+    let prof = crate::copyprof::start();
     let whole = read(src, dst, len);
+    prof.end(crate::copyprof::Slot::Read, len);
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::MoveUs, moved.elapsed().as_micros() as u64);
     if whole {
@@ -7691,11 +7713,13 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
     crate::copystat::add(crate::copystat::C::Fallbacks, 1);
     #[cfg(feature = "diagnostics")]
     let sparse = std::time::Instant::now();
+    let prof = crate::copyprof::start();
     if !title_dst && len >= 64 << 10 {
         read_sparse(src, dst, len);
     } else {
         read_pieces(src, dst, len);
     }
+    prof.end(crate::copyprof::Slot::Fallback, len);
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::SparseUs, sparse.elapsed().as_micros() as u64);
 }
@@ -8183,6 +8207,7 @@ impl Meter {
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame"
         );
         late_line(frames);
+        crate::copyprof::log(frames);
         card_clock_line(frames, ms);
         #[cfg(feature = "diagnostics")]
         for (kind, counters) in ["title", "upload and readback"].into_iter().zip(&DRIVER_SUBMISSIONS) {

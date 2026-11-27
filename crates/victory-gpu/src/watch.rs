@@ -375,7 +375,9 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+    let lock = crate::copyprof::start();
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    lock.end(crate::copyprof::Slot::JournalLock, 0);
     let j = &mut *j;
     // Asked ahead with the submission's other ranges: the journal has it.
     if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
