@@ -377,6 +377,56 @@ pub extern "system" fn XMemIsToolsMemAvailable() -> BOOL {
 
 const PAGE: usize = 64 << 10;
 
+/// Bytes passed to a successful [`commit`] of a physical-page section view so far. Windows
+/// charges committed section pages to the system commit limit but not to the process's private
+/// bytes (`PagefileUsage`), so the title's own figure misses them.
+// shortcut: an upper bound: pages shown by several views are counted for each, and pages
+// committed one by one under `VICTORY_LAZY_COMMIT=1` are not counted.
+static POOL_COMMITTED: AtomicU64 = AtomicU64::new(0);
+
+/// `VICTORY_COMMIT_LOG=1`: log the physical page pool against the system commit limit when it
+/// is allocated, and `pool_committed_mb` in the memory-statistics line. Log only: what the title
+/// is told is unchanged. Off by default. (Ported from MiniVI 1daa0435, GPL-3.0.)
+fn commit_log_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_COMMIT_LOG").is_some_and(|v| v == "1"))
+}
+
+/// Whether `size` bytes still fit in the system's commit headroom.
+fn pool_fits(headroom: u64, size: u64) -> bool {
+    size <= headroom
+}
+
+/// Logs the commit a new pool of `size` bytes may need against the system commit limit: its
+/// pages are committed as touched, never decommitted, and do not show in private bytes, so a
+/// small paging file can run out midway. Under Wine a section is committed whole.
+fn note_pool_commit(size: usize) {
+    if on_wine() {
+        return;
+    }
+    let mut info = PERFORMANCE_INFORMATION {
+        cb: size_of::<PERFORMANCE_INFORMATION>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the buffer and size describe a writable PERFORMANCE_INFORMATION.
+    if unsafe { K32GetPerformanceInfo(&mut info, info.cb) } == 0 {
+        return;
+    }
+    let limit = (info.CommitLimit * info.PageSize) as u64;
+    let headroom = limit.saturating_sub((info.CommitTotal * info.PageSize) as u64);
+    let (pool_mb, limit_mb, headroom_mb) = (size as u64 >> 20, limit >> 20, headroom >> 20);
+    if pool_fits(headroom, size as u64) {
+        tracing::info!(pool_mb, limit_mb, headroom_mb, "physical page pool against the commit limit");
+    } else {
+        tracing::warn!(
+            pool_mb,
+            limit_mb,
+            headroom_mb,
+            "physical page pool larger than the commit headroom: it is committed as the title              touches it and is not counted in private bytes, so the Windows paging file may              need enlarging"
+        );
+    }
+}
+
 struct Section(HANDLE);
 
 // SAFETY: a section handle may be used from any thread.
@@ -506,6 +556,9 @@ fn allocate_physical(n: usize, flags: u64, per: usize, pages: *mut usize) -> boo
         flags = format_args!("{flags:#x}"),
         "XMemAllocatePhysicalPages"
     );
+    if commit_log_on() {
+        note_pool_commit(n * PAGE);
+    }
     // For the GPU side's in-place census: only a committed section can be
     // opened as a host heap.
     for (section, chunk) in &chunks {
@@ -1079,6 +1132,9 @@ fn commit(base: usize, len: usize) -> bool {
     }
     // SAFETY: `[base, base + len)` is a view of a reserved section.
     if !unsafe { VirtualAlloc(base as *const c_void, len, MEM_COMMIT, PAGE_READWRITE) }.is_null() {
+        if commit_log_on() {
+            POOL_COMMITTED.fetch_add(len as u64, Ordering::Relaxed);
+        }
         return true;
     }
     let error = std::io::Error::last_os_error();
@@ -1235,6 +1291,7 @@ pub extern "system" fn XMemGetWorkingSetStatistics(_which: u32, out: *mut Workin
             which = _which,
             limit_mb = stats.title_limit >> 20,
             used_mb = stats.title_used >> 20,
+            pool_committed_mb = POOL_COMMITTED.load(Ordering::Relaxed) >> 20,
             "the title asks how much memory it uses"
         );
     }
@@ -1288,6 +1345,14 @@ pub(crate) fn module() -> HleModule {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pool_fits_within_headroom() {
+        assert!(pool_fits(8 << 30, 6 << 30));
+        assert!(pool_fits(6 << 30, 6 << 30));
+        assert!(!pool_fits(5 << 30, 6 << 30));
+        assert!(!pool_fits(0, PAGE as u64));
+    }
+
     #[test]
     fn arranging_follows_either_switch() {
         assert!(!arrange_wanted(None, None));
