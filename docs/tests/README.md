@@ -63,5 +63,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 34 | 2026-11-27 | round 1 (combo a56b129): baseline A, every switch off | 4.4 | 4.5 | 17 | 156 | floating box, dither | 44 | [chart](test-34.svg) |
 | 35 | 2026-11-27 | round 1: ONE change on vs baseline: host copies read title memory in... | 4.3 | 4.5 | 17.4 | 136 | clean, faint smear | 42 | [chart](test-35.svg) |
 | 36 | 2026-11-27 | round 1: ONE change on vs baseline: remap lock released right after t... | 4.2 | 4.1 | 17.1 | 143 | unchecked | 42* | [chart](test-36.svg) |
+| 37 | 2026-11-27 | round 1: shorter remap lock (M1LK_SHORT_REMAP_LOCK=1) | - | - | - | - | clean, faint smear | - | no run data |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
