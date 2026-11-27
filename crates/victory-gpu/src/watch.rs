@@ -300,6 +300,9 @@ fn ask_run(j: &mut Journal, pieces: &[(usize, usize)]) {
 fn ask_kernel(j: &mut Journal, first: usize, last: usize) -> bool {
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
+    if skip_known_view(first, last) {
+        return false;
+    }
     let mut count = (last - first) * PAGE / KERNEL_PAGE;
     j.found.resize(count.max(j.found.len()), 0);
     let mut granularity = 0;
@@ -390,6 +393,22 @@ fn quiet(j: &Journal, first: usize, last: usize, taken: &[u64]) -> bool {
 }
 
 #[cfg(test)]
+mod skip_tests {
+    use super::{BLOCK, PAGE, ends_blocks};
+
+    #[test]
+    fn end_blocks_of_page_ranges() {
+        let per = BLOCK / PAGE;
+        assert_eq!(ends_blocks(5, 5), None);
+        assert_eq!(ends_blocks(6, 5), None);
+        assert_eq!(ends_blocks(0, 1), Some((0, 0)));
+        assert_eq!(ends_blocks(3 * per, 3 * per + 1), Some((3, 3)));
+        assert_eq!(ends_blocks(2 * per, 7 * per), Some((2, 6)));
+        assert_eq!(ends_blocks(2 * per, 7 * per + 1), Some((2, 7)));
+    }
+}
+
+#[cfg(test)]
 mod quiet_tests {
     use super::{Journal, quiet};
 
@@ -443,20 +462,27 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     let mut granularity = 0;
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
+    // A range in view memory we guard is never write-watched: the asking
+    // would fail, so go straight to the guards (`VICTORY_WATCH_SKIP=1`).
+    // Only for `guarded` callers; the others get `None` either way.
+    let skipped = guarded && skip_known_view(first, last);
     // SAFETY: the answer buffer holds `count` entries.
-    let failed = unsafe {
-        GetWriteWatch(
-            WRITE_WATCH_FLAG_RESET,
-            (first * PAGE) as *const _,
-            (last - first) * PAGE,
-            j.found.as_mut_ptr().cast(),
-            &mut count,
-            &mut granularity,
-        )
-    } != 0;
+    let failed = skipped
+        || unsafe {
+            GetWriteWatch(
+                WRITE_WATCH_FLAG_RESET,
+                (first * PAGE) as *const _,
+                (last - first) * PAGE,
+                j.found.as_mut_ptr().cast(),
+                &mut count,
+                &mut granularity,
+            )
+        } != 0;
     let guarded = if failed {
         #[cfg(feature = "diagnostics")]
-        crate::copyprof::failed(started.elapsed());
+        if !skipped {
+            crate::copyprof::failed(started.elapsed());
+        }
         count = 0;
         if !guarded {
             return None;
@@ -502,6 +528,67 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
 
 /// Guarded blocks of view memory.
 const BLOCK: usize = PAGE;
+
+/// Whether a write-watch asking about pages known to be view memory is
+/// skipped (`VICTORY_WATCH_SKIP=1`, alias `M1LK_WATCH_SKIP`; off by default).
+///
+/// View memory (xmem's sections) is never write-watched, so every asking
+/// that touches it fails: in the copy profile 4,154 failed askings a frame,
+/// 14.6 ms, each followed by the guards' answer for the same range. A range
+/// whose first or last block the guards hold (read-only by our hand, or
+/// noted absent) is such memory as long as the runtime has not remapped it,
+/// and [`title_memory_remapped`] clears both marks when it does. Skipping
+/// the asking then changes nothing in what is reported: the caller takes
+/// the path it takes after the failure today.
+pub(crate) fn watch_skip() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_WATCH_SKIP").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!("M1LK Watch Skip: on (VICTORY_WATCH_SKIP=1)");
+        }
+        on
+    })
+}
+
+/// Askings skipped by [`skip_known_view`] since the start, and when the
+/// last summary was logged (milliseconds since [`SKIP_EPOCH`]).
+static SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SKIP_LOGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SKIP_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// The blocks whose marks decide [`skip_known_view`] for pages
+/// `[first, last)`: the first and the last (one if they are the same).
+/// `None` for an empty range.
+fn ends_blocks(first: usize, last: usize) -> Option<(usize, usize)> {
+    (first < last).then(|| (first.saturating_mul(PAGE) / BLOCK, last.saturating_mul(PAGE).div_ceil(BLOCK).saturating_sub(1)))
+}
+
+/// With [`watch_skip`]: true (and counted) if pages `[first, last)` begin
+/// or end in a block the guards hold, whose write-watch asking would fail.
+/// Reads the lock-free mirrors only ([`PROTECTED`], [`ABSENT`]).
+fn skip_known_view(first: usize, last: usize) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !watch_skip() {
+        return false;
+    }
+    let Some((a, b)) = ends_blocks(first, last) else {
+        return false;
+    };
+    let known = |block| protected_one(block) || absent_one(block);
+    if !(known(a) || (b != a && known(b))) {
+        return false;
+    }
+    let n = SKIPPED.fetch_add(1, Relaxed) + 1;
+    let epoch = *SKIP_EPOCH.get_or_init(std::time::Instant::now);
+    let now = epoch.elapsed().as_millis() as u64;
+    let then = SKIP_LOGGED.load(Relaxed);
+    // One summary every ten seconds at most.
+    if now.saturating_sub(then) >= 10_000 && SKIP_LOGGED.compare_exchange(then, now.max(1), Relaxed, Relaxed).is_ok() {
+        tracing::info!(skipped = n, "M1LK Watch Skip: {n} calls skipped");
+    }
+    true
+}
 
 /// (Neptune) Lock-free mirrors of the guards' protected and absent sets (`Guards::protected`,
 /// `Guards::absent`), written under the guards' lock with the sets: [`ask_once`] asks whether a
