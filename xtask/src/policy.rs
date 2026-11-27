@@ -11,10 +11,15 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 const MAX_FILE_SIZE: usize = 512 * 1024;
+/// Rust source of our own may grow past the general limit (the shader lowering
+/// is one large match); the encoded-run check still applies to it.
+const MAX_SOURCE_SIZE: usize = 1024 * 1024;
 const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
     "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
+    // Our own test tooling and its result tables (plain text, still run-checked).
+    "py", "csv",
     // Text-only vector images of our own (the project logo).
     "svg",
 ];
@@ -164,11 +169,9 @@ pub fn check(path: &str, content: &[u8]) -> Vec<String> {
     if !allowed {
         problems.push("file type not on the allowlist".to_owned());
     }
-    if content.len() > MAX_FILE_SIZE {
-        problems.push(format!(
-            "{} bytes exceeds the {MAX_FILE_SIZE}-byte limit",
-            content.len()
-        ));
+    let limit = if ext.as_deref() == Some("rs") { MAX_SOURCE_SIZE } else { MAX_FILE_SIZE };
+    if content.len() > limit {
+        problems.push(format!("{} bytes exceeds the {limit}-byte limit", content.len()));
     }
     for (magic, what) in FORBIDDEN_MAGIC {
         if content.starts_with(magic) {
