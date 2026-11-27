@@ -18,6 +18,11 @@ Direct3D 12. M1LK targets NVIDIA only; AMD users should use other projects.
 
 The project is experimental. Expect low frame rates, rendering errors and crashes.
 
+> [!TIP]
+> **Want to help?** Message **3cvil** on Discord. Testers and contributors are welcome.
+> Most of the work here is done with Claude, so **Claude API credits are what M1LK needs most**.
+> Please never post an API key in an issue or comment; message me instead.
+
 ## Status
 
 All figures come from the reference machine (RTX 4060 Laptop GPU 8 GB, i5-12500H, 16 GB RAM,
