@@ -798,7 +798,11 @@ pub(crate) fn page_window(pages: &[usize], offset: usize, len: usize) -> Option<
 fn port_on() -> bool {
     static ON: LazyLock<bool> = LazyLock::new(|| {
         let var = |name: &str| std::env::var(name).ok();
-        arrange_wanted(var("VICTORY_PORT_CONSTANTS").as_deref(), var("VICTORY_INPLACE_CONSTANTS").as_deref())
+        arrange_wanted(
+            var("VICTORY_PORT_CONSTANTS").as_deref(),
+            var("VICTORY_INPLACE_CONSTANTS").as_deref(),
+            var("VICTORY_ZCM_ARRANGE").as_deref(),
+        )
     });
     *ON
 }
@@ -816,9 +820,19 @@ fn section_pages(n: usize, per: usize, arranging: bool, low: &[(usize, usize)]) 
     }
 }
 
-/// Whether [`arrange`] runs, from the two switches' values.
-fn arrange_wanted(port: Option<&str>, inplace: Option<&str>) -> bool {
-    port.is_some_and(|v| v.trim() == "1") || inplace.is_some_and(|v| v.trim() == "1")
+/// Whether [`arrange`] runs, from the switches' values.
+///
+/// `VICTORY_ZCM_ARRANGE` (public `M1LK_ZCM_ARRANGE`) runs the coalesce and
+/// arrange step for M1LK ZCM alone, off by default, so the constants heap can
+/// be made one run of one section without the other effects of the renderer
+/// port or the in-place placement path. It only gives the title's fresh
+/// (never mapped, never written) 32-bit graphics pages their section slices
+/// in address order, and keeps a reservation-sized allocation one section
+/// (see [`section_pages`]); nothing live is moved, copied back, hashed or
+/// refreshed, so the device-removal risk is the same as the arrange step the
+/// other two switches already run.
+fn arrange_wanted(port: Option<&str>, inplace: Option<&str>, zcm: Option<&str>) -> bool {
+    [port, inplace, zcm].into_iter().any(|v| v.is_some_and(|v| v.trim() == "1"))
 }
 
 /// The title's reservations of 64 KiB pages for 32-bit graphics memory:
@@ -1387,10 +1401,15 @@ mod tests {
 
     #[test]
     fn arranging_follows_either_switch() {
-        assert!(!arrange_wanted(None, None));
-        assert!(!arrange_wanted(Some("0"), Some("alt")));
-        assert!(arrange_wanted(Some("1"), None));
-        assert!(arrange_wanted(None, Some(" 1 ")));
+        assert!(!arrange_wanted(None, None, None));
+        assert!(!arrange_wanted(Some("0"), Some("alt"), Some("0")));
+        assert!(arrange_wanted(Some("1"), None, None));
+        assert!(arrange_wanted(None, Some(" 1 "), None));
+        // M1LK ZCM can run the arrange step on its own, off by default.
+        assert!(arrange_wanted(None, None, Some("1")));
+        assert!(arrange_wanted(None, None, Some(" 1 ")));
+        assert!(!arrange_wanted(None, None, Some("")));
+        assert!(!arrange_wanted(None, None, Some("yes")));
     }
 
     use super::*;
