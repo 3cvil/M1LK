@@ -186,11 +186,6 @@ impl Owners {
         Some(joined)
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish(&self, shadow: u64, address: usize, data: &[u8]) -> usize {
-        self.publish_with(&CHANGED, shadow, address, data, &mut Vec::new())
-    }
-
     /// [`Owners::publish`], and with `BACK_OWN_VIEW` the pages the bytes went
     /// into through a view of our own are given back in `notes` (page, the
     /// asking before, the asking now), for the copy that wrote them to note
