@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
 
@@ -1809,7 +1809,7 @@ static LET_GO: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 #[cfg(feature = "diagnostics")]
 pub(crate) fn windows() -> [u64; 3] {
     let asked: u64 = {
-        let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let loose = loose_shared();
         loose
             .values()
             .map(|s| {
@@ -1833,7 +1833,7 @@ pub(crate) fn windows() -> [u64; 3] {
 #[cfg(feature = "diagnostics")]
 pub(crate) fn window_use() -> [u64; 8] {
     let mut out = [0u64; 8];
-    let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let loose = loose_shared();
     for s in loose.values() {
         let copied = s.copied.read().unwrap_or_else(|e| e.into_inner());
         let pages = copied.iter().filter(|&&at| at != 0).count() as u64;
@@ -1942,7 +1942,7 @@ pub(crate) fn let_go_idle() {
     let gone: Vec<Arc<Shadow>> = {
         // Held from the look to the removal: `loose` hands a copy out
         // under the same lock, so none is handed out in between.
-        let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = loose_map();
         if map.is_empty() {
             return;
         }
@@ -2027,7 +2027,7 @@ pub(crate) fn let_go_idle() {
 #[cfg(feature = "diagnostics")]
 pub(crate) fn memory() -> [u64; 6] {
     let (windows, window_bytes) = {
-        let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let loose = loose_shared();
         // Each copy once: a window may stand under several keys.
         let mut seen = std::collections::HashSet::new();
         let bytes: u64 = loose
@@ -3258,8 +3258,10 @@ struct Entry {
     shadow: Option<Arc<Shadow>>,
 }
 
+type Buffers = BTreeMap<(u64, usize), Entry>;
+
 /// Title buffers by (start address, resource), with their copy once made.
-static BUFFERS: Mutex<BTreeMap<(u64, usize), Entry>> = Mutex::new(BTreeMap::new());
+static BUFFERS: RwLock<Buffers> = RwLock::new(BTreeMap::new());
 static BUFFER_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Changes when the same guest buffer descriptor can resolve to a new owner.
@@ -3267,8 +3269,28 @@ pub(crate) fn buffer_generation() -> u64 {
     BUFFER_GENERATION.load(Ordering::Acquire)
 }
 
-fn buffers() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Entry>> {
-    BUFFERS.lock().unwrap_or_else(|e| e.into_inner())
+fn buffers() -> RwLockWriteGuard<'static, Buffers> {
+    BUFFERS.write().unwrap_or_else(|e| e.into_inner())
+}
+
+fn buffers_shared() -> RwLockReadGuard<'static, Buffers> {
+    BUFFERS.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The innermost title buffer holding `[address, end)`, if any.
+fn buffer_key(map: &Buffers, address: u64, end: u64) -> Option<(u64, usize)> {
+    map.range(..=(address, usize::MAX))
+        .rev()
+        .take(64)
+        .find(|(_, e)| e.end >= end)
+        .map(|(k, _)| *k)
+}
+
+/// Whether read-only lookups take a shared lock (`M1LK_SHADOW_RWLOCK=1`; off
+/// by default). A lookup that must make a copy or a window still takes the
+/// exclusive lock.
+fn shadow_rwlock() -> bool {
+    victory_core::switches::SHADOW_RWLOCK.is_on()
 }
 
 /// A title buffer exists at `start` (`len` bytes).
@@ -3315,7 +3337,7 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
     let end = at.saturating_add(len);
     let mut gone: Vec<Arc<Shadow>> = Vec::new();
     {
-        let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = loose_map();
         let keys: Vec<(u64, u64)> = map
             .range((at.saturating_sub(WINDOW), 0)..(end, 0))
             .filter(|(key, shadow)| shadow.place.is_some() && key.0 + key.1 > at)
@@ -3349,7 +3371,7 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
 /// bytes, true).
 pub(crate) fn spans() -> Vec<(u64, u64, bool)> {
     let mut spans: Vec<(u64, u64, bool)> = buffers().iter().map(|(key, entry)| (key.0, entry.end - key.0, false)).collect();
-    let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let loose = loose_shared();
     spans.extend(loose.keys().map(|&(start, len)| (start, len, true)));
     spans
 }
@@ -3509,13 +3531,22 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
 
 fn lookup_tables(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
     let end = address.checked_add(len.max(1))?;
+    if shadow_rwlock() {
+        // Only an existing copy is read: making one needs the exclusive lock
+        // below.
+        let map = buffers_shared();
+        let key = buffer_key(&map, address, end);
+        if let Some(key) = key
+            && let Some(shadow) = map.get(&key).and_then(|entry| entry.shadow.clone())
+        {
+            return Some(shadow);
+        }
+        if key.is_none() {
+            return loose(address, end, len <= 1, any);
+        }
+    }
     let mut map = buffers();
-    let key = map
-        .range(..=(address, usize::MAX))
-        .rev()
-        .take(64)
-        .find(|(_, e)| e.end >= end)
-        .map(|(k, _)| *k);
+    let key = buffer_key(&map, address, end);
     let Some(key) = key else {
         drop(map);
         return loose(address, end, len <= 1, any);
@@ -3713,7 +3744,7 @@ fn fine() -> bool {
 /// which is copied once for each.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn window_cover() -> u64 {
-    let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let loose = loose_shared();
     cover(loose.keys().copied())
 }
 
@@ -3743,14 +3774,25 @@ fn longest_tail(windows: impl Iterator<Item = (u64, u64)>, address: u64, end: u6
         .min()
 }
 
-/// Copies of title memory outside buffers, by (start, length).
-static LOOSE: Mutex<BTreeMap<(u64, u64), Arc<Shadow>>> = Mutex::new(BTreeMap::new());
+type Loose = BTreeMap<(u64, u64), Arc<Shadow>>;
 
-fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Shadow>> {
-    let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+/// Copies of title memory outside buffers, by (start, length).
+static LOOSE: RwLock<Loose> = RwLock::new(BTreeMap::new());
+
+fn loose_map() -> RwLockWriteGuard<'static, Loose> {
+    LOOSE.write().unwrap_or_else(|e| e.into_inner())
+}
+
+fn loose_shared() -> RwLockReadGuard<'static, Loose> {
+    LOOSE.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The window (start, length) `loose` hands out for an ask, chosen among the
+/// windows in `map`.
+fn loose_key(map: &Loose, address: u64, end: u64, unsized_ask: bool, any: bool) -> (u64, u64) {
     let (cell, _) = window_of(address, end, WINDOW);
     let named = window_of(address, end, if unsized_ask { WINDOW } else { window() });
-    let (start, len) = if unsized_ask && tails() {
+    if unsized_ask && tails() {
         let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
         longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
     } else if any && fine() && !unsized_ask {
@@ -3761,16 +3803,32 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         holder(there, address, end).unwrap_or(named)
     } else {
         named
-    };
-    // Under the lock, with the handing out: see `let_go_idle`.
-    let note = |shadow: &Shadow| {
-        shadow.used.store(crate::host::moment(), Ordering::Relaxed);
-        shadow.asked[0].fetch_min(address, Ordering::Relaxed);
-        shadow.asked[1].fetch_max(end, Ordering::Relaxed);
-        if unsized_ask {
-            shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Notes an ask of a window handed out (under the table's lock, with the
+/// handing out: see `let_go_idle`).
+fn note_ask(shadow: &Shadow, address: u64, end: u64, unsized_ask: bool) {
+    shadow.used.store(crate::host::moment(), Ordering::Relaxed);
+    shadow.asked[0].fetch_min(address, Ordering::Relaxed);
+    shadow.asked[1].fetch_max(end, Ordering::Relaxed);
+    if unsized_ask {
+        shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Shadow>> {
+    if shadow_rwlock() {
+        let map = loose_shared();
+        let (start, len) = loose_key(&map, address, end, unsized_ask, any);
+        if let Some(shadow) = map.get(&(start, len)) {
+            note_ask(shadow, address, end, unsized_ask);
+            return Some(shadow.clone());
         }
-    };
+    }
+    let mut map = loose_map();
+    let (start, len) = loose_key(&map, address, end, unsized_ask, any);
+    let note = |shadow: &Shadow| note_ask(shadow, address, end, unsized_ask);
     if let Some(shadow) = map.get(&(start, len)) {
         note(shadow);
         return Some(shadow.clone());
@@ -4021,6 +4079,28 @@ mod window_tests {
     }
 }
 
+#[cfg(test)]
+mod lookup_tests {
+    use super::{Buffers, Entry, buffer_key};
+
+    /// The shared and exclusive lookups select the same buffer: the
+    /// innermost one whose end holds the ask.
+    #[test]
+    fn buffer_key_takes_the_innermost_buffer_that_holds_the_ask() {
+        let mut map = Buffers::new();
+        map.insert((0x1000, 1), Entry { end: 0x3000, shadow: None });
+        map.insert((0x1800, 2), Entry { end: 0x2800, shadow: None });
+        map.insert((0x4000, 3), Entry { end: 0x5000, shadow: None });
+        assert_eq!(buffer_key(&map, 0x1900, 0x2000), Some((0x1800, 2)));
+        assert_eq!(buffer_key(&map, 0x1000, 0x2000), Some((0x1000, 1)));
+        assert_eq!(buffer_key(&map, 0x4900, 0x4a00), Some((0x4000, 3)));
+        assert_eq!(buffer_key(&map, 0x4900, 0x5100), None);
+        assert_eq!(buffer_key(&map, 0x500, 0x600), None);
+        assert_eq!(buffer_key(&map, 0x1800, 0x2800), Some((0x1800, 2)));
+        assert_eq!(buffer_key(&map, 0x2000, 0x3000), Some((0x1000, 1)));
+    }
+}
+
 /// For device-removed reports: the copy of title memory whose host range
 /// starts closest below host GPU address `va`, and where `va` is in it.
 pub(crate) fn near(va: u64) -> String {
@@ -4028,13 +4108,7 @@ pub(crate) fn near(va: u64) -> String {
         .values()
         .filter_map(|e| e.shadow.as_deref().map(|s| (s.gpu, s.start, s.len)))
         .collect();
-    all.extend(
-        LOOSE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .map(|s| (s.gpu, s.start, s.len)),
-    );
+    all.extend(loose_shared().values().map(|s| (s.gpu, s.start, s.len)));
     let below = all.iter().filter(|c| c.0 <= va).max();
     let above = all.iter().filter(|c| c.0 > va).min();
     let mut text = match below {
