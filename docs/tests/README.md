@@ -71,7 +71,23 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 42 | 2026-11-27 | VIctory-NVIDIA snapshot (test/vnv-base), frame generation off, same s... | - | - | 5.4 | - | unchecked | - | [chart](test-42.svg) |
 | 43 | 2026-11-27 | VIctory-NVIDIA snapshot (test/vnv-base) rerun with a log file, frame... | - | - | 5.3 | - | unchecked | - | [chart](test-43.svg) |
 | 44 | 2026-11-27 | VIctory-NVIDIA snapshot, now with our save and settings copied into i... | 1.5 | 1.5 | 16.6 | 136 | white blocks/specks | 23* | [chart](test-44.svg) |
-| 45 | 2026-11-27 | VIctory-reloaded snapshot 9941051 (its own NVIDIA defaults): whole-bu... | 0.3 | 3.3 | 16.6 | 130 | unchecked | 40* | [chart](test-45.svg) |
+| 45 | 2026-11-27 | VIctory-reloaded snapshot 9941051 (its own NVIDIA defaults): whole-bu... | 0.3 | 3.3 | 16.6 | 130 | dark, no artifacts named | 42 | [chart](test-45.svg) |
 | 46 | 2026-11-27 | VIctory-reloaded snapshot, second (warm) run: shaders/pipelines alrea... | - | - | 13.1 | - | unchecked | - | [chart](test-46.svg) |
+| 47 | 2026-11-27 | round 1 baseline B repeat (current main build, profilers on) | 4.1 | 4.2 | 16.9 | 141 | see README | 45* | [chart](test-47.svg) |
+| 48 | 2026-11-27 | pair for r12-homogenize-on (same build, M1LK_INPLACE off) | 1.1 | 4.3 | 17.2 | 153 | unchecked | 41* | [chart](test-48.svg) |
+| 49 | 2026-11-27 | M1LK ZCM diagnosis: logs why the constants-heap arrange step exits si... | 1.3 | 4.5 | 17.2 | 151 | unchecked | 41* | [chart](test-49.svg) |
+| 50 | 2026-11-27 | ASK_REASK control (same build, switch off): biggest estimated CPU lev... | 1.1 | 4.2 | 17.2 | 141 | unchecked | 43* | [chart](test-50.svg) |
+| 51 | 2026-11-27 | ASK_REASK on: stop re-asking GetWriteWatch each flush | 1.1 | 3.9 | 17.6 | 140 | unchecked | 38* | [chart](test-51.svg) |
+| 52 | 2026-11-27 | M1LK ZCM fix 650f79b8: the 32-bit graphics heap's reservation recorde... | 1.4 | 5 | 18.3 | 142 | unchecked | 38* | [chart](test-52.svg) |
+| 53 | 2026-11-27 | M1LK ZCM combo build (round12 + heap fix 82ffb0bd), both zero-copy sw... | 1.1 | 3.8 | 17.1 | 154 | unchecked | 40* | [chart](test-53.svg) |
+| 54 | 2026-11-27 | M1LK ZCM combo build, both zero-copy paths ON: constants heap (174 MB... | 1.6 | 4.4 | 16.7 | 158 | unchecked | 44* | [chart](test-54.svg) |
+| 55 | 2026-11-27 | M1LK ZCM Tell (df400589): combo-on plus telling placed textures what... | 3.2 | 4.2 | 16.1 | 142 | unchecked | 46* | [chart](test-55.svg) |
+| 56 | 2026-11-27 | M1LK ZCM combo-on without the 2 MB section split: does the section-vi... | 1.6 | 4 | 17.2 | 137 | unchecked | 40* | [chart](test-56.svg) |
+| 57 | 2026-11-27 | frame-overlap quick test, existing switches only: combo-on plus more... | 1.6 | 4.3 | 17.4 | 132 | unchecked | 40* | [chart](test-57.svg) |
+| 58 | 2026-11-27 | M1LK Watch Skip pair, OFF half (same exe as ws-on | 1.6 | 4.1 | 17.1 | 146 | unchecked | 42* | [chart](test-58.svg) |
+| 59 | 2026-11-27 | M1LK Watch Skip ON: skip ~4150 failed write-watch asks/frame on view... | 1.6 | 4.2 | 17.3 | 138 | unchecked | 41* | [chart](test-59.svg) |
+| 60 | 2026-11-27 | M1LK Strain: let 4 non-hair programs (cull masks, LOD blends, decal c... | 1.5 | 4.4 | 17.1 | 144 | unchecked | 41* | [chart](test-60.svg) |
+| 61 | 2026-11-27 | M1LK Strain OFF half (same exe as strain) | 1.5 | 3.9 | 17.2 | 129 | unchecked | 40* | [chart](test-61.svg) |
+| 62 | 2026-11-27 | ladder step 2: Watch Skip (repeat of ws-on, curd exe) | 1.8 | 4.3 | 16.4 | 139 | unchecked | 42* | [chart](test-62.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
