@@ -1464,8 +1464,6 @@ mod tests {
         assert!(arrange_wanted(None, Some(" 1 ")));
     }
 
-    use super::*;
-
     fn query(address: *const c_void) -> BasicInformation {
         // SAFETY: plain data; zero is a valid value.
         let mut info: BasicInformation = unsafe { std::mem::zeroed() };
