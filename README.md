@@ -47,6 +47,7 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | 11 | 2026-11-27 | + ambient light stand-in, title's own upscaler | Series S, `--no-rt`, `VICTORY_UPSCALER=6`, 15 min with play | Median 4.6 fps, peak 16.4 GB, no crash. Rooms are still very dark. Found later: floating white blocks and orange speckles in one outdoor scene (Series S only; being fixed). |
 | 12 | 2026-11-27 | same build, repeat | as above | Standing 3.9 fps, **walking 5.1 fps** (low 4.3), peak 16.9 GB, no crash. Same white blocks and speckles. Free RAM fell to 45 MB during the run. |
 | 13 | 2026-11-27 | DLSS fix, copy changes, fork fixes | Series S | Not valid: these test builds were made without the scripted-input feature, so they waited at a menu. Being re-run with the right build. |
+| 14 | 2026-11-27 | fork fixes (shader NaN, helper lanes, cache, compute waits) + DLSS fix | series-s, --no-rt | standing/all median 4.5 fps (91 samples), peak 5942 draws/frame; WALKING median 5.4 fps, low 3.6 (32 samples). Picture check pending. |
 
 This table is updated after every test run.
 
