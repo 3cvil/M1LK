@@ -5045,6 +5045,8 @@ float4 lit() : SV_Target { return 1.0; }
                 host.execute(&[&list]);
                 drop(list);
             }
+            // The read-back is tiled into title memory by a thread of its own.
+            crate::texback::settle_writes_for_test();
             let actual = unsafe { std::slice::from_raw_parts(at as *const u8, size) };
             assert_eq!(actual.iter().zip(&expected).position(|(a, b)| a != b), None, "dimension {dimension}");
             let mut second = null;

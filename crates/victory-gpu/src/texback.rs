@@ -280,6 +280,10 @@ struct Writer {
     /// By title address: the newest landing for that allocation.
     waiting: std::sync::Mutex<std::collections::HashMap<usize, Landing>>,
     more: std::sync::Condvar,
+    /// Set (under `waiting`) while a drained batch is being written.
+    working: std::sync::atomic::AtomicBool,
+    /// Signalled when the writer has nothing waiting and nothing in hand.
+    idle: std::sync::Condvar,
 }
 
 impl Writer {
@@ -300,24 +304,44 @@ impl Writer {
     }
 }
 
+/// Waits until every read-back handed to [`writer`] has been written (a test's
+/// barrier; the title never waits for it).
+#[cfg(test)]
+pub(crate) fn settle_writes_for_test() {
+    let Some(writer) = asynchronous().then(writer).flatten() else { return };
+    let mut waiting = writer.waiting.lock().unwrap_or_else(|e| e.into_inner());
+    while !waiting.is_empty() || writer.working.load(std::sync::atomic::Ordering::SeqCst) {
+        waiting = writer.idle.wait_timeout(waiting, std::time::Duration::from_secs(10)).unwrap_or_else(|e| e.into_inner()).0;
+    }
+}
+
 /// The writer, if its thread could be started (if not, landings are written
 /// where they are made).
 fn writer() -> Option<&'static Writer> {
     static WRITER: OnceLock<Option<&'static Writer>> = OnceLock::new();
     *WRITER.get_or_init(|| {
         let writer: &'static Writer =
-            Box::leak(Box::new(Writer { waiting: Default::default(), more: std::sync::Condvar::new() }));
+            Box::leak(Box::new(Writer {
+            waiting: Default::default(),
+            more: std::sync::Condvar::new(),
+            working: Default::default(),
+            idle: std::sync::Condvar::new(),
+        }));
         let started = std::thread::Builder::new().name("texture read-backs".into()).spawn(move || loop {
             let batch: Vec<Landing> = {
                 let mut waiting = writer.waiting.lock().unwrap_or_else(|e| e.into_inner());
                 while waiting.is_empty() {
                     waiting = writer.more.wait(waiting).unwrap_or_else(|e| e.into_inner());
                 }
+                writer.working.store(true, std::sync::atomic::Ordering::SeqCst);
                 waiting.drain().map(|(_, landing)| landing).collect()
             };
             for landing in &batch {
                 write(landing);
             }
+            let _waiting = writer.waiting.lock().unwrap_or_else(|e| e.into_inner());
+            writer.working.store(false, std::sync::atomic::Ordering::SeqCst);
+            writer.idle.notify_all();
         });
         match started {
             Ok(_) => Some(writer),
