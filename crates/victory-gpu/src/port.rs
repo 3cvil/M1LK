@@ -71,11 +71,20 @@ const MOST: u64 = 512 << 20;
 /// `VICTORY_PORT_CONSTANTS`: `1` turns renderer port #1 on (title buffers
 /// and windows of title memory in the title's 32-bit graphics memory, view
 /// memory that is one stretch of a section, used in place); unset or
-/// anything else: off, everything as before.
+/// anything else: off, everything as before. Stands down when
+/// `VICTORY_INPLACE_CONSTANTS=1` is on too (`crate::inplace::constants_on`
+/// opens the same pages, and also accounts the flights' writes there).
 pub(crate) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // Read once, here: the switch of renderer port #1.
-    *ON.get_or_init(|| std::env::var("VICTORY_PORT_CONSTANTS").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| {
+        let on = std::env::var("VICTORY_PORT_CONSTANTS").is_ok_and(|v| v.trim() == "1");
+        if on && crate::inplace::constants_on() {
+            tracing::warn!("VICTORY_PORT_CONSTANTS=1 stands down: VICTORY_INPLACE_CONSTANTS=1 places the same memory in place");
+            return false;
+        }
+        on
+    })
 }
 
 /// A stretch of title memory opened as a heap through a view of ours.
