@@ -191,6 +191,19 @@ pub extern "system" fn XMemVirtualAlloc(
     }
     if !at.is_null() && placeholder && constrained && flags & ADDRESS_32BIT != 0 {
         LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).push((at as usize, size));
+        tracing::info!(at = format_args!("{at:p}"), size, "M1LK ZCM: 32-bit graphics reservation recorded for arranging");
+    } else if !at.is_null() && size >= 64 << 20 {
+        static BIG: AtomicU64 = AtomicU64::new(0);
+        if BIG.fetch_add(1, Ordering::Relaxed) < 8 {
+            tracing::info!(
+                at = format_args!("{at:p}"),
+                size,
+                placeholder,
+                constrained,
+                flags = format_args!("{flags:#x}"),
+                "M1LK ZCM: large reservation NOT recorded for arranging"
+            );
+        }
     }
     at
 }
@@ -863,10 +876,16 @@ fn arrange(base: usize, pages: &[usize]) {
         .copied()
         .find(|&(at, len)| at <= base && base + pages.len() * PAGE <= at + len)
     else {
+        static MISS: AtomicU64 = AtomicU64::new(0);
+        if MISS.fetch_add(1, Ordering::Relaxed) < 6 {
+            let known = LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).len();
+            tracing::info!(at = format_args!("{base:#x}"), pages = pages.len(), known, "M1LK ZCM: arrange skipped: map is in no recorded 32-bit graphics reservation");
+        }
         return;
     };
     let mut table = physical();
     let Some(section) = pages.first().and_then(|p| table.pages.get(p)).map(|s| s.section.clone()) else {
+        tracing::info!(at = format_args!("{base:#x}"), "M1LK ZCM: arrange skipped: first page unknown");
         return;
     };
     let whole = table.pages.values().filter(|s| Arc::ptr_eq(&s.section, &section)).count();
@@ -925,6 +944,12 @@ fn arrange(base: usize, pages: &[usize]) {
         }
         owner.insert(want, *number);
         moved += 1;
+    }
+    if moved == 0 {
+        static NONE: AtomicU64 = AtomicU64::new(0);
+        if NONE.fetch_add(1, Ordering::Relaxed) < 6 {
+            tracing::info!(at = format_args!("{base:#x}"), pages = pages.len(), not_fresh = ARRANGED[1].load(Ordering::Relaxed), "M1LK ZCM: arrange moved nothing (already in order, or slices not fresh)");
+        }
     }
     if moved > 0 {
         let all = ARRANGED[0].fetch_add(moved, Ordering::Relaxed) + moved;
