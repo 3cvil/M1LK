@@ -67,6 +67,51 @@ static JOURNAL: Mutex<Journal> = Mutex::new(EMPTY_JOURNAL);
 /// call that resets written pages costs 30-70 microseconds whatever the
 /// range).
 const AHEAD_GAP: usize = (8 << 20) / PAGE;
+/// The gap with [`scan`] on: 64 MiB. A resetting asking costs 20-70
+/// microseconds whatever it covers (run of the copy profile: 1,880 askings,
+/// 40 ms a frame), walking a gap's pages some 0.65 ms a GiB (idea and
+/// figure from xcl-dev/xcl `title_textures.rs`, GPL-3.0-or-later,
+/// reimplemented): fewer, wider askings. `VICTORY_WATCH_GAP_MB` sets it.
+const SCAN_GAP: usize = (64 << 20) / PAGE;
+
+/// Whether the wider write-watch scans are on (`VICTORY_WATCH_SCAN=0` turns
+/// them off; on by default): ranges of a submission up to [`SCAN_GAP`]
+/// apart are one kernel asking, and a range [`writes`] asks the kernel
+/// about while an ahead asking stands is answered from the journal for the
+/// rest of that asking's window, not asked again by each overlapping copy.
+/// Nothing reported written is lost either way: every page the kernel
+/// reports (gap pages too) goes into the journal, which every copy reads.
+pub(crate) fn scan() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_WATCH_SCAN").is_none_or(|v| v != "0");
+        if on {
+            tracing::info!(
+                gap_mb = ahead_gap() * PAGE >> 20,
+                "write-watch scans: wide askings, one scan a window (VICTORY_WATCH_SCAN=0 turns it off)"
+            );
+        }
+        on
+    })
+}
+
+/// The most ranges a window's journal answers from: each [`writes`] looks
+/// through them all.
+const AHEAD_RANGES: usize = 512;
+
+/// The gap below which ranges are asked about together, in pages.
+fn ahead_gap() -> usize {
+    static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *GAP.get_or_init(|| {
+        if std::env::var_os("VICTORY_WATCH_SCAN").is_some_and(|v| v == "0") {
+            return AHEAD_GAP;
+        }
+        std::env::var("VICTORY_WATCH_GAP_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(SCAN_GAP, |mb| ((mb << 20) / PAGE).min(AHEAD_MAX))
+    })
+}
 /// The most one asking covers (its answer needs 8 bytes per 4 KiB page).
 const AHEAD_MAX: usize = (1 << 30) / PAGE;
 
@@ -86,7 +131,8 @@ pub(crate) fn ask_ahead(ranges: impl Iterator<Item = (usize, usize)>) {
     }
     let pieces = watched_pieces(ranges);
     if pieces.len() >= 2 {
-        ask_groups(&mut j, &pieces);
+        let gap = if scan() { ahead_gap() } else { AHEAD_GAP };
+        ask_groups(&mut j, &pieces, gap);
     }
 }
 
@@ -99,7 +145,7 @@ fn watched_pieces(ranges: impl Iterator<Item = (usize, usize)>) -> Vec<(usize, u
     pieces
 }
 
-fn ask_groups(j: &mut Journal, pieces: &[(usize, usize)]) {
+fn ask_groups(j: &mut Journal, pieces: &[(usize, usize)], gap: usize) {
     j.asked += 1;
     j.ahead_asked = j.asked;
     j.ahead.clear();
@@ -109,7 +155,7 @@ fn ask_groups(j: &mut Journal, pieces: &[(usize, usize)]) {
         let mut last = pieces[i].1;
         let mut k = i + 1;
         while k < pieces.len()
-            && pieces[k].0 <= last + AHEAD_GAP
+            && pieces[k].0 <= last + gap
             && last.max(pieces[k].1) - first <= AHEAD_MAX
         {
             last = last.max(pieces[k].1);
@@ -190,7 +236,8 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
     pieces.dedup();
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
     let j = &mut *j;
-    ask_groups(j, &pieces);
+    let gap = if scan() { ahead_gap() } else { AHEAD_GAP };
+    ask_groups(j, &pieces, gap);
     // `ask_groups` leaves a range that lies alone to `writes`, which asks
     // once per flush: with one asking for the submission that was every
     // such range asked again at each of its 70 flushes (run 76: 2,300
@@ -270,6 +317,8 @@ fn ask_kernel(j: &mut Journal, first: usize, last: usize) -> bool {
         )
     } != 0;
     if failed {
+        #[cfg(feature = "diagnostics")]
+        crate::copyprof::failed(started.elapsed());
         return false;
     }
     #[cfg(feature = "diagnostics")]
@@ -406,6 +455,8 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
         )
     } != 0;
     let guarded = if failed {
+        #[cfg(feature = "diagnostics")]
+        crate::copyprof::failed(started.elapsed());
         count = 0;
         if !guarded {
             return None;
@@ -429,8 +480,16 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     j.asked += 1;
     let now = j.asked;
     note_kernel_writes(j, count, now);
+    let kernel = guarded.is_empty() && !failed;
     for page in guarded {
         j.written.insert(page, now);
+    }
+    // An ahead asking stands ([`ask_ahead`], [`ask_once`]): the range was
+    // just scanned, so the window's other copies of these pages answer from
+    // the journal (`ahead_asked` is older than `now`: they may copy more,
+    // never less).
+    if kernel && !j.ahead.is_empty() && j.ahead.len() < AHEAD_RANGES && scan() {
+        j.ahead.push((first, last));
     }
     Some((
         now,
@@ -1180,6 +1239,36 @@ pub(crate) mod tests {
         clean.insert(0, 24);
         assert!(clean.gaps(0, 24).is_empty());
         assert_eq!(clean.0.len(), 1);
+    }
+
+    /// Ranges far apart are one asking with a wide gap, and the gap's
+    /// written pages go into the journal (none lost to the reset).
+    #[test]
+    fn wide_askings_merge_ranges_and_keep_gap_writes() {
+        // SAFETY: a fresh write-watched allocation, freed at the end.
+        let p = unsafe { VirtualAlloc(std::ptr::null(), 40 * PAGE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE) } as usize;
+        assert_ne!(p, 0);
+        let base = p / PAGE;
+        let pieces = [(base, base + 1), (base + 30, base + 31)];
+        let write = |page: usize| unsafe { ((p + page * PAGE + 8) as *mut u8).write(1) };
+        // Narrow gap: two lone pieces, left to `writes`.
+        let mut narrow = EMPTY_JOURNAL;
+        ask_groups(&mut narrow, &pieces, 8);
+        assert!(narrow.ahead.is_empty());
+        write(0);
+        write(10);
+        write(30);
+        let mut wide = EMPTY_JOURNAL;
+        ask_groups(&mut wide, &pieces, SCAN_GAP);
+        assert_eq!(wide.ahead, [(base, base + 31)]);
+        let now = wide.ahead_asked;
+        assert_eq!(wide.written, BTreeMap::from([(base, now), (base + 10, now), (base + 30, now)]));
+        // The kernel's bits were reset; the journal still holds them.
+        ask_groups(&mut wide, &pieces, SCAN_GAP);
+        assert_eq!(wide.written.get(&(base + 10)), Some(&now));
+        assert!(wide.ahead_asked > now);
+        // SAFETY: our allocation.
+        unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
     }
 
     #[test]

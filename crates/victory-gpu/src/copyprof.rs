@@ -62,9 +62,13 @@ pub(crate) enum Slot {
     /// `Copy` in `Read`: reads that took the in-place path
     /// (`VICTORY_COPY_PLAIN=1`); the rest of `Read` went through the kernel.
     ReadPlain,
+    /// GetWriteWatch calls that failed (memory not write-watched, or a
+    /// merged range across reservations), wherever made; inside `writes`,
+    /// `ask_ahead` or `ask_once*`.
+    WatchFailed,
 }
 
-const NAMES: [&str; 19] = [
+const NAMES: [&str; 20] = [
     "step_copy",
     " step_wrote",
     "step_fill",
@@ -84,6 +88,7 @@ const NAMES: [&str; 19] = [
     "gpu_write",
     "ask_once*",
     "   read_plain",
+    " watch_failed",
 ];
 
 const N: usize = NAMES.len();
@@ -107,6 +112,15 @@ impl Timer {
             c[1].fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
             c[2].fetch_add(bytes as u64, Ordering::Relaxed);
         }
+    }
+}
+
+/// A failed GetWriteWatch call that took `took`.
+pub(crate) fn failed(took: std::time::Duration) {
+    if on() {
+        let c = &CELLS[Slot::WatchFailed as usize];
+        c[0].fetch_add(1, Ordering::Relaxed);
+        c[1].fetch_add(took.as_micros() as u64, Ordering::Relaxed);
     }
 }
 
