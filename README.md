@@ -51,6 +51,7 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | 15 | 2026-11-27 | fork fixes, shader loop limit 1024 (was 32) | series-s, --no-rt, VICTORY_SHADER_LOOP_LIMIT=1024 | standing/all median 3.3 fps (57 samples), peak 7146 draws/frame; no walking samples; free RAM fell to 0.1 GB and the run stopped at about 10 min. Picture: white specks and a blocky sky in the window view (not seen with limit 32). Result: worse, keep 32. |
 | 16 | 2026-11-27 | fork fixes, title memory kept in place (VICTORY_INPLACE=1) | series-s, --no-rt, VICTORY_INPLACE=1 | standing/all median 3.5 fps (126 samples), peak 10636 draws/frame; WALKING median 2.6 fps, low 0.2 (42 samples). Picture: clean, no blocks or specks (flagged shots were ceiling lights); the character's head now draws; room very dark. Not comparable to #14: this run reached a heavier scene (10.6k vs 5.9k draws/frame). Same-session repeat queued. |
 | 17 | 2026-11-27 | parallel texture checks (VICTORY_PARALLEL_REFRESH=1) | series-s, --no-rt, VICTORY_PARALLEL_REFRESH=1 | No result: stopped by hand. The test install had lost its saved settings, so the run sat on a first-run menu screen and never reached the world. Rerun queued with the settings restored. |
+| 18 | 2026-11-27 | texture checks side by side (VICTORY_PARALLEL_REFRESH=1) rerun: first try stuck at first-run legal screen | series-s, --no-rt, VICTORY_PARALLEL_REFRESH=1 | never reached the world (draws/frame <= 200). Picture check pending. |
 
 This table is updated after every test run.
 
