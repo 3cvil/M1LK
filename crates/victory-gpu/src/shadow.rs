@@ -3958,14 +3958,14 @@ mod window_tests {
     /// of the tables moves the count they are from.
     #[test]
     fn the_lookup_cache_is_off_and_table_changes_are_counted() {
-        assert!(!lookup_cache());
-        let before = TABLES_CHANGED.load(Ordering::Acquire);
-        tables_changed();
-        assert!(TABLES_CHANGED.load(Ordering::Acquire) > before);
-        LOOKUP_CACHE_TEST.with(|c| c.set(Some(true)));
-        assert!(lookup_cache());
-        LOOKUP_CACHE_TEST.with(|c| c.set(None));
-        assert!(!lookup_cache());
+        assert!(!super::lookup_cache());
+        let before = super::TABLES_CHANGED.load(std::sync::atomic::Ordering::Acquire);
+        super::tables_changed();
+        assert!(super::TABLES_CHANGED.load(std::sync::atomic::Ordering::Acquire) > before);
+        super::LOOKUP_CACHE_TEST.with(|c| c.set(Some(true)));
+        assert!(super::lookup_cache());
+        super::LOOKUP_CACHE_TEST.with(|c| c.set(None));
+        assert!(!super::lookup_cache());
     }
 
     /// The setting takes powers of two from 64 KiB to 4 MiB; anything else
