@@ -160,8 +160,18 @@ impl Section {
 /// `VICTORY_SECTION_SCAN_CONT=1`: the section scan of a block goes on past a saveexec with no
 /// restore in the block. Off by default: it ends there, as before. Part of the shader cache key (`victory-gpu`'s).
 fn scan_continues() -> bool {
+    #[cfg(test)]
+    if let Some(v) = TEST_SCAN_CONT.with(|c| c.get()) {
+        return v;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_SECTION_SCAN_CONT").is_some_and(|v| v == "1"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: forces the scan continuation on or off for the current test thread.
+    static TEST_SCAN_CONT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// Every whole-wave section of `block`, by start index.
@@ -1324,6 +1334,7 @@ mod tests {
     /// stop at the first unmatched one. (Ported from PiloteBox d193085a, GPL-3.0.)
     #[test]
     fn an_unmatched_saveexec_leaves_the_later_sections_of_its_block() {
+        TEST_SCAN_CONT.with(|c| c.set(Some(true)));
         let total = |w: &[u32], start: usize| {
             let p = build(w, true);
             let insts = &p.blocks[0].insts;

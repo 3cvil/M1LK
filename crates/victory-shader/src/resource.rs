@@ -426,8 +426,17 @@ const MAX_JOINS: usize = 8;
 /// EXEC guard lets them run it. Off by default (every lane that reaches the access, as before).
 /// Part of the shader cache key.
 fn guard_trace() -> bool {
+    #[cfg(test)]
+    if let Some(v) = TEST_GUARD_TRACE.with(|c| c.get()) {
+        return v;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_GUARD_TRACE").is_some_and(|v| v == "1"))
+}
+#[cfg(test)]
+thread_local! {
+    /// Test hook: forces the guard trace on or off for the current test thread.
+    static TEST_GUARD_TRACE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 /// VGPR values followed for one dword of a descriptor kept per lane.
 const MAX_COPIES: usize = 64;
@@ -3928,6 +3937,7 @@ pub(crate) mod tests {
         .iter()
         .flat_map(|w| w.to_le_bytes())
         .collect();
+        TEST_GUARD_TRACE.with(|c| c.set(Some(true)));
         let p = crate::ir::build(&code, false, 256).unwrap();
         let structured = lanes(&p).expect("structured form");
         assert!(structured.guards[2][0].is_some(), "join access must carry an EXEC guard");
