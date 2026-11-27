@@ -7696,7 +7696,7 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
     #[cfg(feature = "diagnostics")]
     let moved = std::time::Instant::now();
     let prof = crate::copyprof::start();
-    let whole = read(src, dst, len);
+    let whole = if title_dst { read(src, dst, len) } else { read_host(src, dst, len) };
     prof.end(crate::copyprof::Slot::Read, len);
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::MoveUs, moved.elapsed().as_micros() as u64);
@@ -7779,7 +7779,22 @@ fn read_pieces(src: *const u8, dst: *mut u8, len: usize) {
 /// Reads title memory at `src` into `dst`; false if a page of it is not
 /// readable.
 pub(crate) fn read_into(src: *const u8, dst: &mut [u8]) -> bool {
-    read(src, dst.as_mut_ptr(), dst.len())
+    read_host(src, dst.as_mut_ptr(), dst.len())
+}
+
+/// Only host destinations come here. A title destination can alias its
+/// source, disappear, or need its write guards opened before the copy.
+/// With `VICTORY_COPY_PLAIN=1` the read is tried in place first (see
+/// `plaincopy`); a fault or the switch being off uses the kernel read.
+fn read_host(src: *const u8, dst: *mut u8, len: usize) -> bool {
+    let prof = crate::copyprof::start();
+    // SAFETY: the caller owns the writable host destination for this read.
+    let plain = unsafe { crate::plaincopy::copy(src, dst, len) };
+    if plain {
+        prof.end(crate::copyprof::Slot::ReadPlain, len);
+        return true;
+    }
+    read(src, dst, len)
 }
 
 /// Copies `len` bytes from `src` to `dst` unless a source page is not

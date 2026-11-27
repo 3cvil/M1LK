@@ -59,9 +59,12 @@ pub(crate) enum Slot {
     GpuWrite,
     /// Not in "copies": the submission's one `ask_once` asking.
     AskOnce,
+    /// `Copy` in `Read`: reads that took the in-place path
+    /// (`VICTORY_COPY_PLAIN=1`); the rest of `Read` went through the kernel.
+    ReadPlain,
 }
 
-const NAMES: [&str; 18] = [
+const NAMES: [&str; 19] = [
     "step_copy",
     " step_wrote",
     "step_fill",
@@ -80,6 +83,7 @@ const NAMES: [&str; 18] = [
     " whole_copy",
     "gpu_write",
     "ask_once*",
+    "   read_plain",
 ];
 
 const N: usize = NAMES.len();
@@ -124,6 +128,10 @@ pub(crate) fn log(frames: f64) {
             n as f64 / frames,
             bytes as f64 / 1e6 / frames
         ));
+    }
+    if let Some(reads) = crate::plaincopy::profile_line(frames) {
+        line.push_str(&reads);
+        line.push_str("; ");
     }
     tracing::info!("copy profile ms/frame: {line}(indented parts are inside the line above; * is not in copies)");
 }
