@@ -96,6 +96,15 @@ pub(crate) fn note_for_test(page: usize, now: u64, mask: u16) {
     note(&mut JOURNAL.lock().unwrap_or_else(|e| e.into_inner()), page, now, mask);
 }
 
+/// Test hook: the journal forgets `page` (a test's heap page, which a later
+/// test may be given).
+#[cfg(test)]
+pub(crate) fn forget_for_test(page: usize) {
+    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    j.written.remove(&page);
+    j.small.remove(&page);
+}
+
 /// The bit of the 4 KiB page holding `at` in its page's mask.
 fn small_bit(at: usize) -> u16 {
     1 << (at % PAGE / KERNEL_PAGE)
@@ -2066,6 +2075,12 @@ pub(crate) mod tests {
         assert!(write_back(plain.as_ptr() as usize, &bytes, false).is_none());
         victory_core::switches::BACK_OWN_VIEW.set(false);
         victory_core::switches::ALIAS_BACK.set(false);
+        // The journal is shared: addresses given back may be given to another test.
+        for view in [a, b] {
+            for page in view / PAGE..(view + SIZE) / PAGE {
+                forget_for_test(page);
+            }
+        }
         drop_views(section, &[a, b], SIZE);
     }
 

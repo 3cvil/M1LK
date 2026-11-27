@@ -3970,6 +3970,7 @@ fn a_4k_refresh_copies_only_the_pieces_written_since_the_copy_took_the_page() {
     assert_eq!(shadow.copy_stale_small(from, to, 13, &[(page, 12)]), 0);
     crate::watch::note_for_test(page, 14, crate::watch::ALL_SMALL);
     assert_eq!(shadow.copy_stale_small(from, to, 14, &[(page, 14)]), PAGE);
+    crate::watch::forget_for_test(page);
     crate::watch::SMALL_HERE.with(|s| s.set(false));
 }
 
