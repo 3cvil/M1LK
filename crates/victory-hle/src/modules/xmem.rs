@@ -595,7 +595,11 @@ pub extern "system" fn XMemAllocatePhysicalPages(
     }
     // SAFETY: checked non-null.
     let n = unsafe { *count };
-    if allocate_physical(n, flags, pages_per_section(), pages) {
+    let per = {
+        let low = LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner());
+        section_pages(n, pages_per_section(), port_on(), &low)
+    };
+    if allocate_physical(n, flags, per, pages) {
         1
     } else {
         // SAFETY: checked non-null.
@@ -799,6 +803,19 @@ fn port_on() -> bool {
     *ON
 }
 
+/// Pages per section for an allocation of `n` pages: `per`, except that
+/// while [`arrange`] is wanted an allocation of exactly the size of a 32-bit
+/// graphics reservation stays one section. `VICTORY_SECTION_MB` would
+/// otherwise cut the heap's pages into many sections, which [`arrange`]
+/// cannot make one run of and the in-place heap turns down ("Scattered").
+fn section_pages(n: usize, per: usize, arranging: bool, low: &[(usize, usize)]) -> usize {
+    if arranging && per != usize::MAX && n.checked_mul(PAGE).is_some_and(|b| low.iter().any(|&(_, len)| len == b)) {
+        usize::MAX
+    } else {
+        per
+    }
+}
+
 /// Whether [`arrange`] runs, from the two switches' values.
 fn arrange_wanted(port: Option<&str>, inplace: Option<&str>) -> bool {
     port.is_some_and(|v| v.trim() == "1") || inplace.is_some_and(|v| v.trim() == "1")
@@ -839,9 +856,24 @@ fn arrange(base: usize, pages: &[usize]) {
         return;
     };
     let whole = table.pages.values().filter(|s| Arc::ptr_eq(&s.section, &section)).count();
-    if whole * PAGE != bytes
-        || !pages.iter().all(|p| table.pages.get(p).is_some_and(|s| Arc::ptr_eq(&s.section, &section)))
-    {
+    let foreign = pages.iter().position(|p| !table.pages.get(p).is_some_and(|s| Arc::ptr_eq(&s.section, &section)));
+    if whole * PAGE != bytes || foreign.is_some() {
+        static SAID: AtomicU64 = AtomicU64::new(0);
+        if SAID.fetch_add(1, Ordering::Relaxed) < 4 {
+            let mut sections: Vec<usize> =
+                pages.iter().filter_map(|p| table.pages.get(p)).map(|s| Arc::as_ptr(&s.section) as usize).collect();
+            sections.dedup();
+            tracing::warn!(
+                at = format_args!("{base:#x}"),
+                reservation = format_args!("{first:#x}+{bytes:#x}"),
+                pages = pages.len(),
+                section_pages = whole,
+                reservation_pages = bytes / PAGE,
+                sections_in_call = sections.len(),
+                first_foreign = ?foreign,
+                "renderer port 1: the 32-bit graphics pages not arranged: their section is not exactly the reservation                  (VICTORY_SECTION_MB splitting it, or pages from several allocations)"
+            );
+        }
         return;
     }
     let key = Arc::as_ptr(&section) as usize;
@@ -1850,6 +1882,16 @@ mod tests {
         assert!(page_window(&[a[0], b[0]], 0, PAGE).is_some());
         assert_eq!(XMemFreePhysicalPages(3, a.as_ptr()), 1);
         assert_eq!(XMemFreePhysicalPages(1, b.as_ptr()), 1);
+    }
+
+    #[test]
+    fn a_reservation_sized_allocation_stays_one_section_while_arranging() {
+        let low = [(0x1000_0000usize, 4 * PAGE)];
+        assert_eq!(section_pages(4, 2, true, &low), usize::MAX);
+        assert_eq!(section_pages(4, 2, false, &low), 2);
+        assert_eq!(section_pages(3, 2, true, &low), 2);
+        assert_eq!(section_pages(4, 2, true, &[]), 2);
+        assert_eq!(section_pages(4, usize::MAX, true, &low), usize::MAX);
     }
 
     #[test]
