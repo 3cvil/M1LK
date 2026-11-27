@@ -1,0 +1,133 @@
+# Starts the title with the settings this fork is played with (README.md, "How to run it").
+#   scripts\play.ps1 -Exe <path of your own copy's executable>
+# -Safe         without the newer, faster ways (the first thing to try when something is wrong)
+# -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
+# -Windowed     a window instead of the whole screen (full screen is the default)
+# -Console      series-x (the default) or series-s: the console the title takes this PC for
+# -Build        target\diag (the default, the build all measurements are of) or target\release
+# -Machine      auto (the default: by the graphics card), 7900xtx or 4090
+# -More         other settings: -More @{VICTORY_PANEL='1'}
+# Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
+param(
+    [Parameter(Mandatory)][string]$Exe,
+    [switch]$Safe,
+    [switch]$RayTracing,
+    [switch]$Windowed,
+    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
+    [ValidateSet('diag', 'release')][string]$Build = 'diag',
+    [ValidateSet('auto', '7900xtx', '4090')][string]$Machine = 'auto',
+    [hashtable]$More = @{}
+)
+$settings = @{
+    VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
+    VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'; VICTORY_CARD_STEPS = '2'
+    VICTORY_TITLE_PRIORITIES = '0'
+    VICTORY_SHOW_AFTER = '1'; VICTORY_AMBIENT = '0.8'; VICTORY_D3D12_DRED = 'light'; VICTORY_SKIP_PIPELINES = 'none'
+}
+if ($Machine -eq 'auto') {
+    # An NVIDIA card (PCI vendor 10DE) gets the 4090's settings, any other the 7900 XTX's.
+    $cards = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.PNPDeviceID })
+    $Machine = if ($cards -match 'VEN_10DE') { '4090' } else { '7900xtx' }
+}
+if ($Machine -eq '7900xtx') {
+    # i9-12900K, RX 7900 XTX, 64 GB: the page-mapping lock was fastest with one
+    # thread, and the AMD driver lowers its clocks between submissions.
+    $settings.VICTORY_MAP_THREADS = '1'; $settings.VICTORY_CARD_AWAKE = '1'
+} else {
+    # RTX 4090, Ryzen 9 9950X3D (16 cores of one kind, two caches), 48 GB.
+    # NVIDIA sets its clocks by the driver's power mode: no spinner on the
+    # compute queue. 16 cores record and land, not 8.
+    $settings.VICTORY_THIN_THREADS = '12'; $settings.VICTORY_UNDER_THREADS = '8'; $settings.VICTORY_LAND_THREADS = '6'
+    if ([Environment]::ProcessorCount -lt 32) {
+        # Fewer logical processors than the 9950X3D's 32: an i9-12900K has 24
+        # (8 fast cores of two threads, 8 slow ones), and 12/8/6 ran more of
+        # our threads beside the submitting one than its cores have. Series S
+        # cell, RTX 4090 with an i9-12900K (upstream 22c6eac merged in): 8/6/3
+        # took the frame 58.0-60.4 -> 54.3-56.1 ms (the submitting thread's
+        # own work 31 -> 27 ms of CPU); 6/4/3 with VICTORY_MAP_THREADS=1 gained
+        # nothing (59.2). With the card buffers below and write-watched XMem
+        # blocks, on 4fa2f0b: 57.3-57.6 -> 49.4-51.5 ms (README, our PC).
+        $settings.VICTORY_THIN_THREADS = '8'; $settings.VICTORY_UNDER_THREADS = '6'; $settings.VICTORY_LAND_THREADS = '3'
+    }
+    # A fifth of the ambient estimate, not 0.8: in the prologue's cell on this
+    # card 0.8 lit the wall and the dark right side 2-3 times as bright as the
+    # console-like picture of our earlier tree; 0.2 is the least tried without
+    # the purple probe blocks that no stand-in leaves, at the same frame time.
+    $settings.VICTORY_AMBIENT = '0.2'
+    # Title buffers from 64 KiB up, not 1 MiB, get a copy in the card's own
+    # memory: in the PC's memory every load a shader makes of them crosses
+    # the bus. A replay of the Series S cell: 34.7 -> 24.3 ms on the card;
+    # live on an i9-12900K the card was busy 46 -> 28 ms a frame and the
+    # frame went 58.0 -> 52.5 ms (upstream 22c6eac merged in); on 4fa2f0b
+    # with the threads above and write-watched XMem blocks the card is busy
+    # 27-35 ms of a 49-52 ms frame. The card's memory in use grew 0.4 GB.
+    $settings.VICTORY_CARD_BUFFERS_MIN_KB = '64'
+    if (-not $Safe) {
+        # Pages are mapped by several threads only while the title streams
+        # (not the default: one run behind it).
+        $settings.VICTORY_MAP_THREADS = 'auto'
+        # A fill of the constant-buffer ring that a small copy at its place writes
+        # into refused the whole submission to the card steps; in list order it is
+        # taken (submit thread 104.7 -> 50.9 ms a frame, 12.1 -> 14.3 fps here).
+        $settings.VICTORY_PLACED_ORDER = '1'
+        # Windows of title memory (what the title's own allocator hands its
+        # draws) lie in the card's memory, written by the CPU through the bus
+        # (upstream bd68f5e's switch): in the PC's memory every read a shader
+        # makes of them crosses it. Sized for this card's 24 GB: the cell's
+        # windows are about 5 GB, and the card's use went 7.6 -> 12.7 GB of
+        # 23.4; at most 6 GB go there, so that textures keep their room in
+        # bigger scenes (the windows past it stay in the PC's memory). A card
+        # with a budget under 20 GiB, or without resizable BAR, keeps them all
+        # in the PC's memory. Series S cell, i9-12900K: card busy 27.2-32.5 ->
+        # 21.4 ms a frame, the submitting thread as it was.
+        $settings.VICTORY_WINDOWS_BAR_MB = '6144'
+        # The title's writes into guarded view memory go in beside the guard
+        # (victory-gpu titlewrite.rs): its memcpy, memmove and memset look at
+        # the guards first, and a store that faults is done through our own
+        # view of the page, or left out if it changes nothing. Series S cell,
+        # i9-12900K, two launches of an in-run A/B: write faults that open a
+        # block 298-307 -> 199-205 a frame, waits for the guards' lock 54-60 ->
+        # 32-36 ms a frame of all threads (most of them the title's), the
+        # frame as it was.
+        $settings.VICTORY_STORE_BESIDE = '1'; $settings.VICTORY_COPY_BESIDE = '1'
+    }
+}
+# -Safe leaves out every way still on trial, and the newest faster ones.
+if ($Safe) {
+    $settings.VICTORY_UNDER_WIDE = '0'; $settings.VICTORY_LAND_ECHO = '0'
+} else {
+    $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
+    # A dispatch does not end a batch of argument clamps before the title waits
+    # for it: off by default, as other ways the title may wait are not known.
+    $settings.VICTORY_INDIRECT_BATCH = '2'
+    # What FSR4's passes (fsr4_model_v07_fp8_no_scale_*, these 20 programs of
+    # this version of the title) write to their scratch, one 21 MB block whole
+    # every frame, stays on the card: the title's CPU never touches it (no
+    # access in a Series S cell launch with VICTORY_LAND_NOT_PROBE=1), and it
+    # was a third of what the relay fetched and merged into title memory.
+    $settings.VICTORY_LAND_NOT = 'f46117391dd81461,8e614708143ef917,3d147e8190574516,528278df1274cb33,f7fc6c984427fef3,' +
+        'c99e30956be0deaf,8cbd7f5b9ce7530c,85dea520c893a3d9,32aa8384586e0f12,f5ab5dcf95536794,47d8c225abfcb246,' +
+        '8fb5e4aa9c542c3f,55c46e739fa0796a,17af85f170e66f30,80a0178d3a9d8d12,477b52e73ddeb6f2,8b437ab61d8008fe,' +
+        'fdce2a0a9fb1521a,6a6c7b7fde59134f,ba578b59c8c28a57'
+}
+if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
+# The whole screen, with no frame, as on the console.
+if (-not $Windowed) { $settings.VICTORY_FULLSCREEN = '1' }
+foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
+
+$ram = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
+Write-Host "Settings for the $Machine$(if ($Safe) { ', safe' })$(if ($RayTracing) { ', with ray tracing' })."
+if ($ram -and $ram -lt 60GB) {
+    Write-Host ("This PC has {0:N0} GB: private memory reaches 40-46 GB; keep a system-managed page file." -f ($ram / 1GB))
+}
+
+$victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
+if (-not (Test-Path $victory)) { Write-Host "No $victory. Build it first (README.md)."; return }
+if (-not (Test-Path $Exe)) { Write-Host "No $Exe."; return }
+# (Other settings left over in this window go; where your files are stays.)
+$paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
+Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
+$Exe = (Resolve-Path $Exe).Path
+Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
+try { & $victory run $Exe --console $Console --execute } finally { Pop-Location }
