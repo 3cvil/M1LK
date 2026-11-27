@@ -33,6 +33,95 @@ use std::sync::Mutex;
 pub(crate) const PAGE: usize = 64 << 10;
 /// The kernel's page, the unit of its answers.
 const KERNEL_PAGE: usize = 4096;
+/// Kernel pages in a tracked page.
+pub(crate) const SMALL: usize = PAGE / KERNEL_PAGE;
+/// A mask of all of a page's kernel pages ([`small_written`]).
+pub(crate) const ALL_SMALL: u16 = u16::MAX;
+
+/// Whether refreshes of write-watched memory copy only the 4 KiB pages the
+/// kernel found written since the copy took them, not the whole 64 KiB page
+/// (`M1LK_WATCH_4K`; runtime switch, off by default).
+///
+/// Ported from bolado-dev (mandy-port 8262b84d, GPL-3.0-or-later), adapted.
+/// The kernel answers per 4 KiB page; the journal kept only the 64 KiB page,
+/// so a page with one 4 KiB page written was copied whole by every copy of
+/// it (their figures: 5,447 4 KiB pages written a frame in 574 64 KiB
+/// pages, 22 MB against 38 MB). With the switch the journal also keeps, per
+/// page, the asking that last found each 4 KiB page written ([`note`]);
+/// every reader still sees the page's stamp as before. A refresh that knows
+/// when its copy took the page whole asks [`small_written`] which of its
+/// 4 KiB pages were written since, and copies those. Exact because a
+/// 4 KiB page left out was found written by no asking after the copy took
+/// the page. Everything that notes a page written other than by the
+/// kernel's answer (guards, our own writes) notes all sixteen; a page whose
+/// 4 KiB stamps are not in step with its stamp reads as written whole, so
+/// the switch may be flipped between two frames.
+pub(crate) fn small() -> bool {
+    #[cfg(test)]
+    if SMALL_HERE.with(std::cell::Cell::get) {
+        return true;
+    }
+    victory_core::switches::WATCH_4K.is_on()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`small`] for this test thread.
+    pub(crate) static SMALL_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Notes `page` written at asking `now`: in `written`, as always, and with
+/// [`small`] in `small`, the 4 KiB pages of `mask` at `now`. A page not yet
+/// in `small` (or one whose stamps fell out of step while the switch was
+/// off) starts with all its 4 KiB pages at the stamp it had.
+fn note(j: &mut Journal, page: usize, now: u64, mask: u16) {
+    let before = j.written.insert(page, now).unwrap_or(0);
+    if !small() {
+        return;
+    }
+    let stamps = j.small.entry(page).or_insert([before; SMALL]);
+    if stamps.iter().copied().max() != Some(before) {
+        *stamps = [before; SMALL];
+    }
+    for (k, stamp) in stamps.iter_mut().enumerate() {
+        if mask & (1 << k) != 0 {
+            *stamp = now;
+        }
+    }
+}
+
+/// Test hook: notes `page` written at asking `now`, the 4 KiB pages of `mask`.
+#[cfg(test)]
+pub(crate) fn note_for_test(page: usize, now: u64, mask: u16) {
+    note(&mut JOURNAL.lock().unwrap_or_else(|e| e.into_inner()), page, now, mask);
+}
+
+/// The bit of the 4 KiB page holding `at` in its page's mask.
+fn small_bit(at: usize) -> u16 {
+    1 << (at % PAGE / KERNEL_PAGE)
+}
+
+/// With [`small`]: of `page`, the 4 KiB pages (bit `k` for the `k`-th) the
+/// journal found written after asking `since`. All of them if the journal
+/// keeps no 4 KiB stamps for the page or they are not in step with its
+/// stamp, or without the switch: the safe answer, the whole page.
+pub(crate) fn small_written(page: usize, since: u64) -> u16 {
+    if !small() || since == 0 {
+        return ALL_SMALL;
+    }
+    let j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (Some(&stamp), Some(stamps)) = (j.written.get(&page), j.small.get(&page)) else {
+        return ALL_SMALL;
+    };
+    if stamps.iter().copied().max() != Some(stamp) {
+        return ALL_SMALL;
+    }
+    stamps.iter().enumerate().filter(|&(_, &s)| s > since).fold(0, |m, (k, _)| m | 1 << k)
+}
+
+/// Bytes of written pages a refresh left because their 4 KiB pages were not
+/// written since the copy took them ([`small`]); since the start.
+pub(crate) static SMALL_LEFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct Journal {
     /// Numbers the askings; 0 is "never".
@@ -50,6 +139,12 @@ struct Journal {
     /// other ahead asking is made, and `ahead` stays, until
     /// [`ask_once_end`].
     kept: bool,
+    /// With [`small`]: per page of `written`, the asking that last found
+    /// each of its sixteen 4 KiB pages written (what the kernel answers;
+    /// every other source notes all sixteen). A page whose stamps here do
+    /// not end at its stamp in `written` is read as written whole
+    /// ([`small_written`]).
+    small: BTreeMap<usize, [u64; SMALL]>,
 }
 
 const EMPTY_JOURNAL: Journal = Journal {
@@ -59,6 +154,7 @@ const EMPTY_JOURNAL: Journal = Journal {
     ahead: Vec::new(),
     ahead_asked: 0,
     kept: false,
+    small: BTreeMap::new(),
 };
 static JOURNAL: Mutex<Journal> = Mutex::new(EMPTY_JOURNAL);
 
@@ -272,7 +368,7 @@ pub(crate) fn wrote(at: usize, len: usize) {
     j.asked += 1;
     let now = j.asked;
     for page in at / PAGE..at.saturating_add(len).div_ceil(PAGE) {
-        j.written.insert(page, now);
+        note(&mut j, page, now, ALL_SMALL);
     }
 }
 
@@ -334,9 +430,12 @@ fn ask_kernel(j: &mut Journal, first: usize, last: usize) -> bool {
 
 fn note_kernel_writes(j: &mut Journal, count: usize, now: u64) {
     let mut previous = None;
-    for &address in &j.found[..count] {
+    for k in 0..count {
+        let address = j.found[k];
         let page = address / PAGE;
-        if previous != Some(page) {
+        if small() {
+            note(j, page, now, small_bit(address));
+        } else if previous != Some(page) {
             j.written.insert(page, now);
             previous = Some(page);
         }
@@ -482,7 +581,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     note_kernel_writes(j, count, now);
     let kernel = guarded.is_empty() && !failed;
     for page in guarded {
-        j.written.insert(page, now);
+        note(j, page, now, ALL_SMALL);
     }
     // An ahead asking stands ([`ask_ahead`], [`ask_once`]): the range was
     // just scanned, so the window's other copies of these pages answer from
@@ -1031,6 +1130,103 @@ pub fn writing(at: usize, len: usize) {
     drop(g);
     // A placed texture there changes with no descriptor written.
     crate::descriptor::host::remapped(at, len);
+}
+
+/// For a page `(number, asking before, asking now)` a copy-back through our
+/// own view noted written in the journal ([`write_back`]).
+pub(crate) type OwnNote = (usize, u64, u64);
+
+/// Whether what shaders wrote is put back into title view memory through a
+/// view of our own on the same section (`ALIAS_BACK`, or `BACK_OWN_VIEW`
+/// which also lets the copy that wrote it note the page current).
+pub(crate) fn back_through_view() -> bool {
+    victory_core::switches::ALIAS_BACK.is_on() || victory_core::switches::BACK_OWN_VIEW.is_on()
+}
+
+/// With [`back_through_view`]: puts `data` into title memory at `at` through
+/// our own views of the sections the title's views there show, and tells the
+/// guards and the journal; `Some(notes)` if done. `None` (some bytes may have
+/// landed; nothing is noted) if the range is not all title views, or a write
+/// failed: the caller then does it as before ([`writing`], then
+/// `crate::host::write_mapped`), which writes the same bytes again. The
+/// caller holds [`title_memory_reading_range`] over the range, so the views
+/// found here stay as they are.
+///
+/// Ported from bolado-dev (mandy-port bfdbfdf2 `write_back`, and fxceless
+/// 6894a575 `write_own`, both GPL-3.0-or-later), adapted to our guards and
+/// journal. The write through the title's own view opened the guarded blocks
+/// under it (and at its other views): each was made read-only again at its
+/// next copy, two `VirtualProtect` calls a block. Through another view of the
+/// same pages no guard covers the bytes:
+///
+/// * `ALIAS_BACK`: the blocks stay read-only and are only noted not clean,
+///   which [`guard`] reports as written (and notes clean again) as it does a
+///   block the runtime wrote while read-only. A title write still faults.
+/// * `BACK_OWN_VIEW` (`own`): the journal is told the pages were written at a
+///   new asking, so every other copy takes them again, and the notes are
+///   given back so the copy that wrote them (which holds the same bytes)
+///   can note them current and not take them in again. The guards are left.
+pub(crate) fn write_back(at: usize, data: &[u8], own: bool) -> Option<Vec<OwnNote>> {
+    if data.is_empty() || !back_through_view() {
+        return None;
+    }
+    let len = data.len();
+    let end = at.checked_add(len)?;
+    // The kernel's write fails on a lazy page: committed first.
+    crate::lazy::ensure(at, len);
+    let targets = crate::inplace::alias_targets(at, len)?;
+    for &(here, n, alias) in &targets {
+        if !crate::host::write_checked(alias as *mut u8, data[here - at..].as_ptr(), n) {
+            return None;
+        }
+    }
+    let mut notes = Vec::new();
+    {
+        let mut g = guards();
+        g.uncommitted.forget(at, end);
+        if !own {
+            let mark = |g: &mut Guards, start: usize, stop: usize| {
+                let blocks: Vec<usize> = g.protected.range(start / BLOCK..stop.div_ceil(BLOCK)).copied().collect();
+                for block in blocks {
+                    g.clean.remove(block);
+                }
+            };
+            mark(&mut g, at, end);
+            let aliased: Vec<usize> = g.aliased.range(at / BLOCK..end.div_ceil(BLOCK)).copied().collect();
+            for block in aliased {
+                for alias in crate::inplace::pages_of(block * BLOCK) {
+                    if alias / BLOCK != block {
+                        mark(&mut g, alias, alias.saturating_add(BLOCK));
+                    }
+                }
+            }
+        }
+    }
+    if own {
+        let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+        j.asked += 1;
+        let now = j.asked;
+        // An asking that stands for a submission, or a flush, moves with it,
+        // or a copy taking the page at the standing asking would find it
+        // written "later" at every refresh (as in [`wrote`]).
+        if j.kept || !j.ahead.is_empty() {
+            j.ahead_asked = now;
+        }
+        for page in at / PAGE..end.div_ceil(PAGE) {
+            let before = j.written.get(&page).copied().unwrap_or(0);
+            note(&mut j, page, now, ALL_SMALL);
+            notes.push((page, before, now));
+            for other in crate::inplace::pages_of(page * PAGE) {
+                if other / PAGE != page {
+                    note(&mut j, other / PAGE, now, ALL_SMALL);
+                }
+            }
+        }
+    }
+    // As `writing` tells: a placed texture there changes with no descriptor
+    // written.
+    crate::descriptor::host::remapped(at, len);
+    Some(notes)
 }
 
 /// A producer finished filling these title bytes. Its pre-write notification
@@ -1814,6 +2010,65 @@ pub(crate) mod tests {
         drop_views(section, &[guarded, other], SIZE);
     }
 
+    /// Shaders' bytes put back through a view of our own (`ALIAS_BACK`): the
+    /// other view of the same pages sees them, no guard is opened (both views
+    /// stay read-only), and the next check of either reports the page
+    /// written. With `BACK_OWN_VIEW` the journal says so at once instead and
+    /// the notes come back.
+    #[test]
+    fn a_write_through_our_own_view_is_seen_and_opens_no_guard() {
+        use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, PAGE_READONLY, VirtualQuery};
+        const SIZE: usize = 2 * BLOCK;
+        let protect_of = |at: usize| {
+            // SAFETY: plain data filled in by the query.
+            let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: a valid out pointer of the right size.
+            unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) };
+            info.Protect
+        };
+        let (section, a, b) = two_views(SIZE);
+        crate::inplace::title_memory_section(section, SIZE as u64, true);
+        let pages = |block: usize| (a + block * BLOCK) / PAGE;
+        victory_core::switches::ALIAS_BACK.set(true);
+        assert!(guard(a, a + SIZE).is_some());
+        assert_eq!(guard(a, a + SIZE), Some(Vec::new()));
+        assert_eq!(protect_of(a), PAGE_READONLY);
+        let bytes = *b"what the shaders wrote";
+        assert_eq!(write_back(a + BLOCK + 100, &bytes, false), Some(Vec::new()));
+        // Still read-only at both views: no guard was opened.
+        assert_eq!(protect_of(a), PAGE_READONLY);
+        assert_eq!(protect_of(b + BLOCK), PAGE_READONLY);
+        // SAFETY: inside both views.
+        let (at_a, at_b) = unsafe {
+            (
+                std::slice::from_raw_parts((a + BLOCK + 100) as *const u8, bytes.len()),
+                std::slice::from_raw_parts((b + BLOCK + 100) as *const u8, bytes.len()),
+            )
+        };
+        assert_eq!((at_a, at_b), (&bytes[..], &bytes[..]));
+        // The next check reports the page written, once.
+        assert_eq!(guard(a, a + SIZE), Some(vec![pages(1)]));
+        assert_eq!(guard(a, a + SIZE), Some(Vec::new()));
+        // With the journal told instead: notes come back for each page, the
+        // pages of the other view are stamped too, and no guard is touched.
+        victory_core::switches::BACK_OWN_VIEW.set(true);
+        let notes = write_back(a + 8, &bytes, true).expect("written");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, pages(0));
+        assert!(notes[0].2 > notes[0].1);
+        {
+            let j = JOURNAL.lock().unwrap();
+            assert_eq!(j.written.get(&(b / PAGE)), Some(&notes[0].2));
+        }
+        assert_eq!(guard(a, a + SIZE), Some(Vec::new()), "the journal says it, not the guard");
+        // A range that is no view is left to the caller.
+        let plain = [0u8; 8];
+        assert!(write_back(plain.as_ptr() as usize, &bytes, false).is_none());
+        victory_core::switches::BACK_OWN_VIEW.set(false);
+        victory_core::switches::ALIAS_BACK.set(false);
+        drop_views(section, &[a, b], SIZE);
+    }
+
     /// A view of guarded pages is mapped anew: it is writable, so the
     /// guarded view checks its pages again (and guards the new view).
     #[test]
@@ -1955,5 +2210,53 @@ mod mapping_tests {
         drop(changing);
         reader.join().unwrap();
         assert!(read.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod small_tests {
+    use super::*;
+
+    /// `WATCH_4K`: the journal's 4 KiB stamps follow the kernel's answers; a
+    /// note of a whole page (the guards, our own writes) makes all of it
+    /// written; a note out of order, or no stamps at all, reads as the whole
+    /// page; and a stretch with the switch off leaves the stamps out of step.
+    #[test]
+    fn small_stamps_follow_the_kernel_and_fall_back_whole() {
+        SMALL_HERE.with(|s| s.set(true));
+        // Pages no test maps.
+        let (page, other) = (usize::MAX / PAGE - 10, usize::MAX / PAGE - 11);
+        let with = |f: &dyn Fn(&mut Journal)| f(&mut JOURNAL.lock().unwrap());
+        with(&|j| note(j, page, 10, 1 << 3));
+        assert_eq!(small_written(page, 5), 1 << 3);
+        assert_eq!(small_written(page, 10), 0);
+        with(&|j| note(j, page, 12, 1 << 7));
+        assert_eq!(small_written(page, 10), 1 << 7);
+        assert_eq!(small_written(page, 5), 1 << 3 | 1 << 7);
+        assert_eq!(small_written(page, 0), ALL_SMALL, "never taken: all of it");
+        with(&|j| note(j, page, 14, ALL_SMALL));
+        assert_eq!(small_written(page, 13), ALL_SMALL);
+        // Out of order: a part noted lower than the page's stamp.
+        with(&|j| note(j, page, 11, 1 << 1));
+        assert_eq!(small_written(page, 12), ALL_SMALL);
+        // No 4 KiB stamps for a page: all of it.
+        with(&|j| {
+            j.written.insert(other, 20);
+        });
+        assert_eq!(small_written(other, 15), ALL_SMALL);
+        // A write noted while the switch was off (stamps out of step) is not
+        // lost when the switch comes back: the next note restarts the stamps
+        // at the page's stamp, and the page reads whole until then.
+        with(&|j| note(j, other, 30, 1 << 2));
+        assert_eq!(small_written(other, 25), 1 << 2);
+        SMALL_HERE.with(|s| s.set(false));
+        with(&|j| note(j, other, 40, 1 << 4));
+        SMALL_HERE.with(|s| s.set(true));
+        assert_eq!(small_written(other, 35), ALL_SMALL, "stamps out of step: whole page");
+        with(&|j| note(j, other, 50, 1 << 5));
+        assert_eq!(small_written(other, 45), 1 << 5);
+        assert_eq!(small_written(other, 35), ALL_SMALL);
+        assert_eq!(small_bit(PAGE * 3 + 5 * KERNEL_PAGE + 7), 1 << 5);
+        SMALL_HERE.with(|s| s.set(false));
     }
 }

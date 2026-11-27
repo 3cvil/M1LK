@@ -576,10 +576,19 @@ struct Views {
     /// Outstanding fenced writes to CPU texture memory. Several lists can
     /// refer to the same destination before any of their fences signal.
     readbacks: Vec<(std::ops::Range<usize>, std::sync::Weak<std::sync::atomic::AtomicBool>)>,
+    /// With `ALIAS_BACK` / `BACK_OWN_VIEW` ([`alias_targets`]): a view of our
+    /// own of each section, whole, by the section's handle (0 where mapping
+    /// it failed).
+    aliases: BTreeMap<usize, usize>,
 }
 
-static VIEWS: Mutex<Views> =
-    Mutex::new(Views { views: BTreeMap::new(), pages: BTreeMap::new(), sections: Vec::new(), readbacks: Vec::new() });
+static VIEWS: Mutex<Views> = Mutex::new(Views {
+    views: BTreeMap::new(),
+    pages: BTreeMap::new(),
+    sections: Vec::new(),
+    readbacks: Vec::new(),
+    aliases: BTreeMap::new(),
+});
 
 fn views() -> std::sync::MutexGuard<'static, Views> {
     VIEWS.lock().unwrap_or_else(|e| e.into_inner())
@@ -625,6 +634,57 @@ pub fn title_memory_section(section: usize, bytes: u64, committed: bool) {
     let mut v = views();
     v.sections.retain(|s| s.0 != section);
     v.sections.push((section, bytes, committed));
+    // A handle used again: the section it named is closed, which it is only
+    // once no title view shows it (each holds it open), so no write through
+    // our view of it is under way (`alias_targets` is asked under a hold on
+    // the mapping). Our view of the old section goes.
+    if let Some(alias) = v.aliases.remove(&section)
+        && alias != 0
+    {
+        // SAFETY: our own view of the old section, which nothing uses.
+        unsafe { mem::UnmapViewOfFile(mem::MEMORY_MAPPED_VIEW_ADDRESS { Value: alias as *mut c_void }) };
+    }
+}
+
+/// For `crate::watch::write_back` (ported from bolado-dev, mandy-port
+/// bfdbfdf2, GPL-3.0-or-later): the title addresses `[at, at + len)` as
+/// pieces `(address, bytes, address in our own view of the same section
+/// bytes)`, if title views show all of it. Our view of a section is mapped
+/// whole at its first use. `None` if a part is no view, or its section could
+/// not be mapped. To be asked while the runtime cannot change a mapping
+/// (`crate::watch::title_memory_reading_range`) and used under the same hold.
+pub(crate) fn alias_targets(at: usize, len: usize) -> Option<Vec<(usize, usize, usize)>> {
+    let end = at.checked_add(len)?;
+    let mut v = views();
+    let mut out = Vec::new();
+    let mut here = at;
+    while here < end {
+        let (&base, &(bytes, section, offset)) = v.views.range(..=here).next_back()?;
+        if base.checked_add(bytes)? <= here {
+            return None;
+        }
+        let n = (base + bytes).min(end) - here;
+        let alias = match v.aliases.get(&section) {
+            Some(&alias) => alias,
+            None => {
+                let size = usize::try_from(v.sections.iter().find(|s| s.0 == section)?.1).ok()?;
+                // SAFETY: a section handle of the runtime's that a title view
+                // shows now (so open); a view of all of it, ours.
+                let alias = unsafe { mem::MapViewOfFile(section as *mut c_void, mem::FILE_MAP_WRITE, 0, 0, size) }.Value as usize;
+                if alias == 0 {
+                    tracing::warn!(section, "no view of our own on a section of title pages: what shaders wrote goes back the old way there");
+                }
+                v.aliases.insert(section, alias);
+                alias
+            }
+        };
+        if alias == 0 {
+            return None;
+        }
+        out.push((here, n, alias + usize::try_from(offset).ok()? + (here - base)));
+        here += n;
+    }
+    Some(out)
 }
 
 /// The runtime mapped `[at, at + len)` as a view of `section` from

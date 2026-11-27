@@ -2389,7 +2389,7 @@ impl Shadow {
                     *h = merged;
                 }
                 if differs != 0 {
-                    written += owners.publish(self.id, start + at, title);
+                    written += self.publish_back(owners, start + at, title);
                 }
             }
             // Our write shows as a title write at the copy's next refresh,
@@ -2483,7 +2483,31 @@ impl Shadow {
         if !merge_piece(now, held, title) {
             return 0;
         }
-        owners.publish(self.id, start + at, title)
+        self.publish_back(owners, start + at, title)
+    }
+
+    /// Puts what a merge made of title memory `[address, address + len)` into
+    /// title memory (`Owners::publish`). With `BACK_OWN_VIEW` the pages that
+    /// went in through a view of our own, which held the bytes the copy
+    /// holds, are noted current for this copy if they were current before: the
+    /// next refresh need not take them in again. Others still do (the
+    /// journal says they were written).
+    fn publish_back(&self, owners: &crate::writeback::Owners, address: usize, data: &[u8]) -> usize {
+        let mut notes = Vec::new();
+        let n = owners.publish_noted(self.id, address, data, &mut notes);
+        if !notes.is_empty() {
+            let base = self.start as usize / PAGE;
+            let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+            for (page, before, now) in notes {
+                if let Some(taken) = page.checked_sub(base).and_then(|i| copied.get_mut(i))
+                    && *taken != 0
+                    && *taken >= before
+                {
+                    *taken = (*taken).max(now);
+                }
+            }
+        }
+        n
     }
 
     /// The 64 KiB pieces (cut at multiples of 64 KiB of title memory) of
@@ -2867,7 +2891,11 @@ impl Shadow {
             if let Some((now, written)) = answer {
                 self.watched.store(1, Ordering::Relaxed);
                 let walk = crate::copyprof::start();
-                let copied = self.copy_stale(from, to, now, &written);
+                let copied = if crate::watch::small() {
+                    self.copy_stale_small(from, to, now, &written)
+                } else {
+                    self.copy_stale(from, to, now, &written)
+                };
                 walk.end(crate::copyprof::Slot::StaleWalk, copied);
                 self.refresh_check(from, to);
                 #[cfg(feature = "diagnostics")]
@@ -2983,6 +3011,76 @@ impl Shadow {
         // Cut to the range: next to it shaders may be writing the copy.
         if let Some(first) = run {
             bytes += self.copy((first * PAGE).max(from), ((last + 1) * PAGE).min(to));
+        }
+        bytes
+    }
+
+    /// [`Shadow::copy_stale`] with `WATCH_4K` (`crate::watch::small`): of a
+    /// page the copy took whole and that was written since, only the 4 KiB
+    /// pieces the journal found written after that are copied. A page taken
+    /// never (or only partly, a page at the edge of the range) is copied as
+    /// before, in the range. Ported from bolado-dev (mandy-port 8262b84d,
+    /// GPL-3.0-or-later), adapted.
+    fn copy_stale_small(&self, from: usize, to: usize, now: u64, written: &[(usize, u64)]) -> usize {
+        const K: usize = crate::watch::PAGE / crate::watch::SMALL;
+        let base = self.start as usize / PAGE;
+        let (start, end) = (self.start as usize, (self.start + self.len) as usize);
+        let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        let mut writes = written.iter().peekable();
+        let mut bytes = 0;
+        // The byte range gathered so far, copied when a piece does not
+        // continue it.
+        let mut run: Option<(usize, usize)> = None;
+        let mut left = 0usize;
+        let last = (to - 1) / PAGE;
+        for page in from / PAGE..=last {
+            let write = match writes.peek() {
+                Some(&&(p, w)) if p == page => {
+                    writes.next();
+                    w
+                }
+                _ => 0,
+            };
+            let at = &mut copied[page - base];
+            let (lo, hi) = ((page * PAGE).max(from), ((page + 1) * PAGE).min(to));
+            if *at != 0 && write <= *at {
+                if let Some((a, b)) = run.take() {
+                    bytes += self.copy(a, b);
+                }
+                continue;
+            }
+            // Of what the copy took whole at `*at`, the 4 KiB pages written since.
+            let mask = if *at == 0 { crate::watch::ALL_SMALL } else { crate::watch::small_written(page, *at) };
+            if (page * PAGE).max(start) >= from && ((page + 1) * PAGE).min(end) <= to {
+                *at = now.max(write);
+            }
+            for k in 0..crate::watch::SMALL {
+                let (a, b) = ((page * PAGE + k * K).max(lo), (page * PAGE + (k + 1) * K).min(hi));
+                if a >= b {
+                    continue;
+                }
+                if mask & (1 << k) == 0 {
+                    left += b - a;
+                    if let Some((x, y)) = run.take() {
+                        bytes += self.copy(x, y);
+                    }
+                    continue;
+                }
+                run = match run {
+                    Some((x, y)) if y == a => Some((x, b)),
+                    Some((x, y)) => {
+                        bytes += self.copy(x, y);
+                        Some((a, b))
+                    }
+                    None => Some((a, b)),
+                };
+            }
+        }
+        if let Some((a, b)) = run {
+            bytes += self.copy(a, b);
+        }
+        if left != 0 {
+            crate::watch::SMALL_LEFT.fetch_add(left as u64, Ordering::Relaxed);
         }
         bytes
     }
@@ -3154,7 +3252,7 @@ impl Shadow {
                 *o = merged;
             }
             if differs != 0 {
-                written = owners.publish(self.id, start + at, title);
+                written = self.publish_back(owners, start + at, title);
             }
         } else {
             // Title memory is not mapped there: the copy keeps what the
@@ -3234,7 +3332,7 @@ impl Shadow {
         if !mapped || !changed {
             return 0;
         }
-        owners.publish(self.id, start + at, title)
+        self.publish_back(owners, start + at, title)
     }
 }
 
@@ -3842,6 +3940,37 @@ fn a_window_in_card_memory_the_cpu_maps_takes_the_titles_bytes() {
     // SAFETY: inside the mapping; a read through the bus, slow but right.
     let held = unsafe { std::slice::from_raw_parts(data, 2 * PAGE) };
     assert!(held.iter().step_by(4096).all(|&b| b == 0x5a));
+}
+
+#[cfg(test)]
+#[test]
+fn a_4k_refresh_copies_only_the_pieces_written_since_the_copy_took_the_page() {
+    let Some(host) = host() else { return };
+    let (buffer, data) = host.upload_buffer(PAGE as u64).unwrap();
+    let mut guest = vec![0x27u8; 2 * PAGE];
+    let base = guest.as_ptr() as usize;
+    let from = base.next_multiple_of(PAGE);
+    let shadow = Shadow::new(buffer, data, 0, from as u64, PAGE as u64);
+    let (to, page) = (from + PAGE, from / PAGE);
+    crate::watch::SMALL_HERE.with(|s| s.set(true));
+    // Taken whole at asking 10.
+    crate::watch::note_for_test(page, 10, crate::watch::ALL_SMALL);
+    assert_eq!(shadow.copy_stale_small(from, to, 10, &[(page, 10)]), PAGE);
+    // The title writes 4 KiB pieces 3 and 4 (found by asking 12); a byte in
+    // piece 9 changes with no note (it must stay as it was in the copy).
+    guest[from - base + 3 * 4096 + 5] = 0x11;
+    guest[from - base + 4 * 4096] = 0x12;
+    guest[from - base + 9 * 4096] = 0x22;
+    crate::watch::note_for_test(page, 12, 0b11000);
+    assert_eq!(shadow.copy_stale_small(from, to, 12, &[(page, 12)]), 2 * 4096);
+    // SAFETY: inside the mapping; nothing else writes it.
+    let held = unsafe { std::slice::from_raw_parts(data, PAGE) };
+    assert_eq!((held[3 * 4096 + 5], held[4 * 4096], held[9 * 4096]), (0x11, 0x12, 0x27));
+    // Nothing newer: nothing copied; a whole-page note takes the page whole.
+    assert_eq!(shadow.copy_stale_small(from, to, 13, &[(page, 12)]), 0);
+    crate::watch::note_for_test(page, 14, crate::watch::ALL_SMALL);
+    assert_eq!(shadow.copy_stale_small(from, to, 14, &[(page, 14)]), PAGE);
+    crate::watch::SMALL_HERE.with(|s| s.set(false));
 }
 
 #[cfg(test)]

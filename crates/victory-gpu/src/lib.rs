@@ -120,3 +120,9 @@ pub use watch::{
     title_memory_remapping, title_memory_remapping_range,
     writing as kernel_will_write,
 };
+
+/// Whether `REMAP_LEAN` is on (start-only): the runtime's page mappings skip
+/// the kernel calls that change nothing.
+pub fn remap_lean_on() -> bool {
+    victory_core::switches::REMAP_LEAN.is_on()
+}

@@ -3403,6 +3403,23 @@ pub(crate) fn late_met(wait: &crate::list::ValueWait) -> bool {
     wait.met()
 }
 
+/// [`late_met`] without its settle (`JOIN_PARTS`): whether a bottom-of-pipe
+/// write of a flight in the air, or of one being landed, is known to meet
+/// `wait`. False says nothing about what else the flights may write there.
+pub(crate) fn late_met_known(wait: &crate::list::ValueWait) -> bool {
+    let (address, bytes) = wait.place();
+    let line = line();
+    if line.written.opaque_completion {
+        return false;
+    }
+    let known = pending_bottom_writes(&line)
+        .any(|(at, what, n)| at == address && n >= bytes && matches!(what, crate::queue::Written::Value(v) if wait.holds_for(*v)));
+    if known {
+        LATE_STATS[13].fetch_add(1, Ordering::Relaxed);
+    }
+    known
+}
+
 fn pending_bottom_writes(line: &Line) -> impl Iterator<Item = (usize, &crate::queue::Written, usize)> {
     line.in_hand.iter().map(|(at, what, len)| (*at, what, *len)).chain(
         line.line.iter().filter_map(|item| match item {
@@ -6940,6 +6957,16 @@ impl HostList {
         self.deferred().writes.push((dst as usize, what, bytes));
     }
 
+    /// Whether the list, once it has run, stores at `address` a value of
+    /// `bytes` bytes or more for which `holds` says yes (one of its
+    /// bottom-of-pipe writes, as [`late_met`] reads them of a flight).
+    pub(crate) fn will_write(&self, address: usize, bytes: usize, holds: impl Fn(u64) -> bool) -> bool {
+        self.deferred()
+            .writes
+            .iter()
+            .any(|(at, what, n)| *at == address && *n >= bytes && matches!(what, crate::queue::Written::Value(v) if holds(*v)))
+    }
+
     /// A mapped upload buffer of `size` bytes, alive until the list is
     /// reset.
     ///
@@ -7862,6 +7889,16 @@ pub(crate) fn write_mapped(dst: *mut u8, src: *const u8, len: usize) {
             });
         }
     });
+}
+
+/// Writes `len` bytes at `dst` (memory of our own, such as a view of a title
+/// section) with the kernel, which fails instead of faulting on a page that
+/// is not there or not writable. True if all of it went in.
+pub(crate) fn write_checked(dst: *mut u8, src: *const u8, len: usize) -> bool {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut done = 0;
+    // SAFETY: the kernel checks the destination; the source holds `len` bytes.
+    unsafe { NtWriteVirtualMemory(GetCurrentProcess(), dst.cast(), src.cast(), len, &mut done) >= 0 }
 }
 
 /// Calls `f` with the pieces of `[start, start + len)` cut at multiples of

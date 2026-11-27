@@ -186,8 +186,23 @@ impl Owners {
         Some(joined)
     }
 
+    #[cfg(test)]
     pub(crate) fn publish(&self, shadow: u64, address: usize, data: &[u8]) -> usize {
-        self.publish_with(&CHANGED, shadow, address, data)
+        self.publish_with(&CHANGED, shadow, address, data, &mut Vec::new())
+    }
+
+    /// [`Owners::publish`], and with `BACK_OWN_VIEW` the pages the bytes went
+    /// into through a view of our own are given back in `notes` (page, the
+    /// asking before, the asking now), for the copy that wrote them to note
+    /// current (`Shadow::publish_back`).
+    pub(crate) fn publish_noted(
+        &self,
+        shadow: u64,
+        address: usize,
+        data: &[u8],
+        notes: &mut Vec<crate::watch::OwnNote>,
+    ) -> usize {
+        self.publish_with(&CHANGED, shadow, address, data, notes)
     }
 
     fn publish_with(
@@ -196,6 +211,7 @@ impl Owners {
         shadow: u64,
         address: usize,
         data: &[u8],
+        notes: &mut Vec<crate::watch::OwnNote>,
     ) -> usize {
         if data.is_empty() {
             return 0;
@@ -211,8 +227,20 @@ impl Owners {
             shadow,
             range.clone(),
         );
-        let write = |span: Range<usize>| {
+        // The bytes of the whole range go in (none withheld): the copy that
+        // made them holds the same ones, so it may note the pages current.
+        let whole = parts.is_none();
+        let own_view = crate::watch::back_through_view();
+        let own_notes = whole && victory_core::switches::BACK_OWN_VIEW.is_on();
+        let mut noted = Vec::new();
+        let mut write = |span: Range<usize>| {
             let n = span.len();
+            if own_view
+                && let Some(done) = crate::watch::write_back(span.start, &data[span.start - address..span.end - address], own_notes)
+            {
+                noted.extend(done);
+                return n;
+            }
             crate::watch::writing(span.start, n);
             crate::host::write_mapped(
                 span.start as *mut u8,
@@ -222,7 +250,9 @@ impl Owners {
             n
         };
         let Some(parts) = parts else {
-            return write(range);
+            let n = write(range);
+            notes.append(&mut noted);
+            return n;
         };
         let bytes = parts.into_iter().map(write).sum();
         #[cfg(feature = "diagnostics")]
@@ -265,7 +295,7 @@ mod tests {
             .unwrap()
             .record(start + PAGE..start + 2 * PAGE, 12, 11);
         let old = Owners::single(12);
-        assert_eq!(old.publish_with(&changes, 9, start, &gpu), 2 * PAGE);
+        assert_eq!(old.publish_with(&changes, 9, start, &gpu, &mut Vec::new()), 2 * PAGE);
         assert_eq!(guest[..PAGE], gpu[..PAGE]);
         assert_eq!(guest[2 * PAGE..], gpu[2 * PAGE..]);
         assert_eq!(guest[object..object + 8], saved);
@@ -276,13 +306,13 @@ mod tests {
         together.declare(13, 8, &[(start + PAGE, start + 2 * PAGE)]);
         together.declare(13, 9, &[(start + PAGE + 8, start + PAGE + 12)]);
         assert_eq!(
-            together.publish_with(&changes, 9, start + PAGE, &gpu[PAGE..2 * PAGE]),
+            together.publish_with(&changes, 9, start + PAGE, &gpu[PAGE..2 * PAGE], &mut Vec::new()),
             4
         );
         assert_eq!(guest[PAGE + 8..PAGE + 12], [0x80; 4]);
         assert_eq!(guest[object..object + 8], saved);
         assert_eq!(
-            Owners::single(13).publish_with(&changes, 9, start + object, &[7; 8]),
+            Owners::single(13).publish_with(&changes, 9, start + object, &[7; 8], &mut Vec::new()),
             8
         );
         assert_eq!(guest[object..object + 8], [7; 8]);

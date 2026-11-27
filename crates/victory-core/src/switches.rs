@@ -19,10 +19,15 @@
 //! | `LOOKUP_CACHE` | runtime | the tables' change count is bumped at a flip, so no thread keeps an old answer |
 //! | `RANGE_MEMO` | runtime | the memo is emptied at a flip (and already dropped each frame) |
 //! | `LOW_SHADOWS` | runtime | decided per draw; a skipped slice is only left cleared |
+//! | `ALIAS_BACK` | runtime | chosen per copy-back write; the guards are only noted not clean, a failed write falls back to the old path |
+//! | `BACK_OWN_VIEW` | runtime | chosen per copy-back write; the journal is told at once and a copy notes its own pages current, both exact for either value |
+//! | `WATCH_4K` | runtime | chosen per refresh; 4 KiB stamps out of step with the page's stamp read as the whole page |
+//! | `JOIN_PARTS` | runtime | chosen per release of the queues' lines; parts taken are all sent before it returns |
 //! | `WATCH_SCAN` | start-only | changes how write-watch askings are laid out and journalled for the whole run |
 //! | `LOWCOMMIT_BACKOFF` | start-only | commit behaviour of uploads and staging is set up at start |
 //! | `INPLACE_CONSTANTS` | start-only | regions and buffer forms are placed once; a title buffer cannot change form |
 //! | `GPU_DETILE` | start-only | textures kept detiled on the card or the PC stay so; the shader is made at start |
+//! | `REMAP_LEAN` | start-only | the bits of pages committed are only kept while it is on from the start; the runtime's mapping path reads it once |
 //!
 //! The schedule (`M1LK_TOGGLE_PLAN`, names joined by `,` or `+` (the test queue splits its env list on commas); see [`parse_plan`] and [`schedule`])
 //! names runtime-safe switches only. [`on_frame`] is called once a frame by
@@ -114,13 +119,18 @@ pub static RANGE_MEMO: Switch = Switch::new("RANGE_MEMO", true, is_one);
 pub static LOW_SHADOWS: Switch = Switch::new("LOW_SHADOWS", true, not_off_word);
 // Start-only: listed so a plan naming them is refused with a reason. Their
 // modules still read their own variables once.
+pub static ALIAS_BACK: Switch = Switch::new("ALIAS_BACK", true, is_one);
+pub static BACK_OWN_VIEW: Switch = Switch::new("BACK_OWN_VIEW", true, is_one);
+pub static WATCH_4K: Switch = Switch::new("WATCH_4K", true, is_one);
+pub static JOIN_PARTS: Switch = Switch::new("JOIN_PARTS", true, is_one);
 pub static WATCH_SCAN: Switch = Switch::new("WATCH_SCAN", false, is_one);
 pub static LOWCOMMIT_BACKOFF: Switch = Switch::new("LOWCOMMIT_BACKOFF", false, is_one);
 pub static INPLACE_CONSTANTS: Switch = Switch::new("INPLACE_CONSTANTS", false, is_one);
 pub static GPU_DETILE: Switch = Switch::new("GPU_DETILE", false, is_one);
+pub static REMAP_LEAN: Switch = Switch::new("REMAP_LEAN", false, is_one);
 
 /// Every switch, runtime-safe and start-only.
-pub static ALL: [&Switch; 12] = [
+pub static ALL: [&Switch; 17] = [
     &COPY_PLAIN,
     &SHORT_REMAP_LOCK,
     &WIDE_REFRESH,
@@ -129,10 +139,15 @@ pub static ALL: [&Switch; 12] = [
     &LOOKUP_CACHE,
     &RANGE_MEMO,
     &LOW_SHADOWS,
+    &ALIAS_BACK,
+    &BACK_OWN_VIEW,
+    &WATCH_4K,
+    &JOIN_PARTS,
     &WATCH_SCAN,
     &LOWCOMMIT_BACKOFF,
     &INPLACE_CONSTANTS,
     &GPU_DETILE,
+    &REMAP_LEAN,
 ];
 
 /// The switch of a name (with or without `M1LK_`/`VICTORY_`, any case).
@@ -375,7 +390,7 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), ALL.len());
         let start_only: Vec<&str> = ALL.iter().filter(|s| !s.runtime_safe).map(|s| s.name).collect();
-        assert_eq!(start_only, vec!["WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE"]);
+        assert_eq!(start_only, vec!["WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE", "REMAP_LEAN"]);
     }
 
     #[test]
