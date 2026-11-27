@@ -63,6 +63,74 @@ pub(crate) unsafe fn copy(src: *const u8, dst: *mut u8, len: usize) -> bool {
     path == Path::Plain
 }
 
+/// (Curd) Upload fills (`Step::Fill`: a draw's constants and other small
+/// title data copied into the list's upload memory at submission) read
+/// title memory in place at any size, with the same fault handler as
+/// `VICTORY_COPY_PLAIN`. Each fill was one `ReadProcessMemory` call of
+/// about 600 bytes, about 9,000 a walking frame: most of `read_rpm`'s
+/// calls, at about 1 µs of kernel crossing each. A fault (or a block
+/// still cooling from one) leaves the fill to the kernel read as today,
+/// which reads the whole range again, so the bytes are the same.
+///
+/// Opt in with `M1LK_CURD=1` (read as `VICTORY_CURD`); independent of
+/// `VICTORY_COPY_PLAIN`.
+pub(crate) fn curd() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let asked = std::env::var_os("VICTORY_CURD").is_some_and(|v| v == "1");
+        #[cfg(target_arch = "x86_64")]
+        let on = asked && x64::install();
+        #[cfg(not(target_arch = "x86_64"))]
+        let on = false;
+        if on {
+            tracing::info!("M1LK Curd: on (VICTORY_CURD=1): upload fills read title memory in place");
+        } else if asked {
+            tracing::warn!("M1LK Curd: asked for but unavailable; upload fills use ReadProcessMemory");
+        }
+        on
+    })
+}
+
+/// Curd's fills read in place, and those left to the kernel (fault or
+/// cooling block), since the start.
+static CURD: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// When the last Curd summary was logged, in ms since [`CURD_EPOCH`].
+static CURD_LOGGED: AtomicU64 = AtomicU64::new(0);
+static CURD_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// One summary every ten seconds at most: `now` and `then` in ms.
+fn summary_due(now: u64, then: u64) -> bool {
+    now.saturating_sub(then) >= 10_000
+}
+
+/// With [`curd`] on: copies an upload fill in place. True when all bytes
+/// were copied; on false the caller reads the whole range through the
+/// kernel, as without Curd.
+///
+/// # Safety
+/// As [`copy`]: `dst` is a writable host allocation for `len` bytes,
+/// disjoint from title memory.
+pub(crate) unsafe fn copy_fill(src: *const u8, dst: *mut u8, len: usize) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: the caller supplies the host buffer; `curd` installed the handler.
+    let plain = unsafe { x64::attempt_from(1, src, dst, len, &x64::FAULTS) } == Path::Plain;
+    #[cfg(not(target_arch = "x86_64"))]
+    let plain = { let _ = (src, dst, len); false };
+    let n = CURD[usize::from(!plain)].fetch_add(1, Relaxed) + 1;
+    let epoch = *CURD_EPOCH.get_or_init(std::time::Instant::now);
+    let now = epoch.elapsed().as_millis() as u64;
+    let then = CURD_LOGGED.load(Relaxed);
+    if summary_due(now, then) && CURD_LOGGED.compare_exchange(then, now.max(1), Relaxed, Relaxed).is_ok() {
+        let (in_place, kernel) = if plain {
+            (n, CURD[1].load(Relaxed))
+        } else {
+            (CURD[0].load(Relaxed), n)
+        };
+        tracing::info!(in_place, kernel, "M1LK Curd: {in_place} fills read in place, {kernel} left to the kernel");
+    }
+    plain
+}
+
 /// Reads per frame by path, for the copy profile line.
 pub(crate) fn profile_line(frames: f64) -> Option<String> {
     let [plain, fault, small, cooling, off] = per_frame(frames);
@@ -262,7 +330,21 @@ mod x64 {
         len: usize,
         faults: &Faults,
     ) -> Path {
-        if len < 256 {
+        // SAFETY: passed through from the caller.
+        unsafe { attempt_from(256, src, dst, len, faults) }
+    }
+
+    /// [`attempt`] with the smallest read tried in place given: Curd's
+    /// upload fills are title data recorded for a draw, not residency
+    /// probes, so they try the instruction at any size.
+    pub(super) unsafe fn attempt_from(
+        min: usize,
+        src: *const u8,
+        dst: *mut u8,
+        len: usize,
+        faults: &Faults,
+    ) -> Path {
+        if len < min {
             return Path::Small;
         }
         if faults.cooling(src as usize, len, now_ms()) {
@@ -307,6 +389,42 @@ mod x64 {
                     assert_eq!(dst[..n], src[..n]);
                     assert!(dst[n..].iter().all(|&v| v == 0));
                 }
+            }
+        }
+
+        #[test]
+        fn curd_reads_small_fills_in_place_with_the_same_bytes() {
+            assert!(install());
+            let src: Vec<u8> = (0..300u32).map(|i| (i * 7 % 251) as u8).collect();
+            let faults = Faults::new();
+            for n in [1, 16, 255, 256, 300] {
+                let mut dst = vec![0xcc; 300];
+                // SAFETY: separate buffers, large enough for every read.
+                let path = unsafe { attempt_from(1, src.as_ptr(), dst.as_mut_ptr(), n, &faults) };
+                assert_eq!(path, Path::Plain);
+                assert_eq!(dst[..n], src[..n]);
+                assert!(dst[n..].iter().all(|&v| v == 0xcc));
+            }
+        }
+
+        #[test]
+        fn curd_leaves_an_unreadable_fill_to_the_kernel_with_the_same_bytes() {
+            assert!(install());
+            let faults = Faults::new();
+            // SAFETY: one reserved, uncommitted page: every read faults.
+            unsafe {
+                let src = VirtualAlloc(std::ptr::null(), PAGE, MEM_RESERVE, PAGE_NOACCESS).cast::<u8>();
+                assert!(!src.is_null());
+                let mut dst = [0x5au8; 64];
+                assert_eq!(attempt_from(1, src, dst.as_mut_ptr(), 64, &faults), Path::Fault);
+                assert_eq!(attempt_from(1, src, dst.as_mut_ptr(), 64, &faults), Path::Cooling);
+                // The kernel read after the fallback zeros it, as without Curd.
+                let mut old = [0x5au8; 64];
+                crate::host::copy_mapped(old.as_mut_ptr(), src, 64, false);
+                crate::host::copy_mapped(dst.as_mut_ptr(), src, 64, false);
+                assert_eq!(dst, old);
+                assert_eq!(dst, [0; 64]);
+                assert_ne!(VirtualFree(src.cast(), 0, MEM_RELEASE), 0);
             }
         }
 
@@ -438,5 +556,18 @@ mod x64 {
                 assert_ne!(VirtualFree(src, 0, MEM_RELEASE), 0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod curd_tests {
+    use super::summary_due;
+
+    #[test]
+    fn curd_summaries_come_ten_seconds_apart() {
+        assert!(summary_due(10_000, 0));
+        assert!(!summary_due(9_999, 0));
+        assert!(!summary_due(5, 10));
+        assert!(summary_due(25_000, 15_000));
     }
 }

@@ -61,6 +61,8 @@ pub(crate) enum Slot {
     AskOnce,
     /// `Copy` in `Read`: reads that took the in-place path
     /// (`VICTORY_COPY_PLAIN=1`); the rest of `Read` went through the kernel.
+    /// With Curd (`VICTORY_CURD=1`) also the upload fills read in place,
+    /// which are not in `Read`.
     ReadPlain,
     /// GetWriteWatch calls that failed (memory not write-watched, or a
     /// merged range across reservations), wherever made; inside `writes`,

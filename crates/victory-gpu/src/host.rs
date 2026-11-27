@@ -7287,8 +7287,27 @@ struct Fill {
 
 impl Fill {
     fn run(self) {
+        // Curd (`M1LK_CURD=1`): in place first, at any size; a fault falls
+        // back to the kernel read of the whole fill below.
+        if self.len != 0 && curd_fills() {
+            let prof = crate::copyprof::start();
+            // SAFETY: fills write the list's host upload memory.
+            if unsafe { crate::plaincopy::copy_fill(self.src as *const u8, self.dst as *mut u8, self.len) } {
+                prof.end(crate::copyprof::Slot::ReadPlain, self.len);
+                return;
+            }
+        }
         copy_mapped(self.dst as *mut u8, self.src as *const u8, self.len, false);
     }
+}
+
+/// Curd is on, and no diagnostic copy mode replaces the copies.
+fn curd_fills() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if crate::copystat::mode() != 0 {
+        return false;
+    }
+    crate::plaincopy::curd()
 }
 
 impl Step {
