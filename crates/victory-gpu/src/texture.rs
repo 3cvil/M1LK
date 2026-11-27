@@ -636,6 +636,105 @@ fn with_title<R>(memory: *const u8, size: usize, f: impl FnOnce(&[u8]) -> R) -> 
     })
 }
 
+/// Whether a texture read through the copy lets the runtime remap title
+/// memory again as soon as the copy is made, not after hashing and detiling
+/// (`VICTORY_SHORT_REMAP_LOCK=1`; off by default). Only the copying paths can
+/// do this: a read in place needs the pages to stay mapped throughout.
+fn short_remap_lock() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_SHORT_REMAP_LOCK").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!(
+                "VICTORY_SHORT_REMAP_LOCK=1: texture reads through the copy release the remap lock                  right after the copy"
+            );
+        }
+        on
+    })
+}
+
+/// [`with_title`] for a caller that holds a mapping guard: with
+/// `release_early` the guard is dropped once the bytes are copied, before
+/// `consume` hashes and detiles them. Otherwise it is held until `consume`
+/// returns, as before.
+fn with_title_snapshot<R>(
+    memory: *const u8,
+    size: usize,
+    mapping: crate::watch::Reading,
+    release_early: bool,
+    consume: impl FnOnce(&[u8]) -> R,
+) -> R {
+    if !release_early {
+        let result = with_title(memory, size, consume);
+        drop(mapping);
+        return result;
+    }
+    with_title(memory, size, |copied| {
+        drop(mapping);
+        consume(copied)
+    })
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::with_title_snapshot;
+    use crate::watch::{title_memory_reading, title_memory_remapping};
+
+    #[test]
+    fn snapshot_preserves_the_bytes_and_selected_remap_lock_lifetime() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        use windows_sys::Win32::System::Memory::*;
+
+        const PAGE: usize = 4096;
+        for (sparse, release_early) in [(false, false), (false, true), (true, false), (true, true)] {
+            // SAFETY: this test owns the entire allocation. Only the writer
+            // remaps it, and only while holding the remapping guard.
+            unsafe {
+                let base = VirtualAlloc(std::ptr::null(), 3 * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE).cast::<u8>();
+                assert!(!base.is_null());
+                base.write_bytes(0x31, 3 * PAGE);
+                if sparse {
+                    assert_ne!(VirtualFree(base.add(PAGE).cast(), PAGE, MEM_DECOMMIT), 0);
+                }
+                let mut original = vec![0x31; 3 * PAGE];
+                if sparse {
+                    original[PAGE..2 * PAGE].fill(0);
+                }
+                let address = base as usize;
+                std::thread::scope(|scope| {
+                    let (begin, wait) = mpsc::channel();
+                    let (attempt, started) = mpsc::channel();
+                    let (finished, remapped) = mpsc::channel();
+                    scope.spawn(move || {
+                        wait.recv().unwrap();
+                        attempt.send(()).unwrap();
+                        let _changing = title_memory_remapping();
+                        let first = address as *mut u8;
+                        assert_ne!(VirtualFree(first.cast(), PAGE, MEM_DECOMMIT), 0);
+                        assert_eq!(VirtualAlloc(first.cast(), PAGE, MEM_COMMIT, PAGE_READWRITE), first.cast());
+                        first.write_bytes(0xa7, PAGE);
+                        let _ = finished.send(());
+                    });
+                    with_title_snapshot(base, 3 * PAGE, title_memory_reading(), release_early, |copied| {
+                        begin.send(()).unwrap();
+                        started.recv().unwrap();
+                        if release_early {
+                            remapped.recv_timeout(Duration::from_secs(5)).expect("writer blocked by the snapshot consumer");
+                        } else {
+                            assert_eq!(remapped.try_recv(), Err(mpsc::TryRecvError::Empty));
+                        }
+                        assert_eq!(copied, original);
+                    });
+                });
+                original[..PAGE].fill(0xa7);
+                with_title_snapshot(base, 3 * PAGE, title_memory_reading(), release_early, |fresh| assert_eq!(fresh, original));
+                assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
+            }
+        }
+    }
+}
+
 /// Staging buffers alive (also those only a list still holds) and their
 /// bytes.
 static STAGED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
@@ -1111,7 +1210,7 @@ impl Staging {
         // Pin the exact span through the committed check, hash and detile.
         // Windows temporarily removes whole physical views on a partial
         // remap; xmem includes those old extents in its writer range.
-        let _mapped = if no_wait() {
+        let mapped = if no_wait() {
             // Not waited for: while the runtime remaps title memory the
             // texture is read through the kernel instead, whole or not at
             // all (`no_wait`).
@@ -1148,8 +1247,7 @@ impl Staging {
             };
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
-            let changed = with_read(size, |read| {
-                crate::host::copy_mapped(read.as_mut_ptr(), self.memory, size, false);
+            let changed = with_title_snapshot(self.memory, size, mapped, short_remap_lock(), |read| {
                 let hash = blake3::hash(read);
                 if last.hash == Some(hash) && last.first == first {
                     return false;
@@ -1173,7 +1271,7 @@ impl Staging {
             return size;
         }
         if through_copy() {
-            return with_title(self.memory, size, |tiled| {
+            return with_title_snapshot(self.memory, size, mapped, short_remap_lock(), |tiled| {
                 let hash = blake3::hash(tiled);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
@@ -1193,7 +1291,7 @@ impl Staging {
             });
         }
         // SAFETY: committed memory of the texture's layout size, and it
-        // stays committed while `_mapped` is held.
+        // stays committed while `mapped` is held.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
         let hash = blake3::hash(tiled);
         #[cfg(feature = "diagnostics")]
