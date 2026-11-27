@@ -230,8 +230,8 @@ const WINDOW_MOST: u64 = 64;
 /// charged what it asks, a few thousand of 2^27. And arguments the title's CPU side changes are seen as
 /// before, at the next submission.
 fn windows() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_INDIRECT_WINDOW").is_some_and(|v| v == "1"))
+    // A runtime switch, on unless M1LK_INDIRECT_WINDOW=0.
+    victory_core::switches::INDIRECT_WINDOW.is_on()
 }
 
 /// What one title list has set, and what its host list was last given.

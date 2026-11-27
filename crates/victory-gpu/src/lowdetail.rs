@@ -84,16 +84,24 @@ pub(crate) fn parse_keep(value: &str) -> Option<u32> {
     }
 }
 
-/// Slices of a shadow array kept, if the switch is on.
-fn keep() -> Option<u32> {
-    static KEEP: OnceLock<Option<u32>> = OnceLock::new();
+/// How many slices the switch keeps when it is on: the number in
+/// `M1LK_LOW_SHADOWS`, or 1 (the nearest cascade) when the switch is turned
+/// on while the title runs.
+fn keep_count() -> u32 {
+    static KEEP: OnceLock<u32> = OnceLock::new();
     *KEEP.get_or_init(|| {
         let keep = std::env::var("VICTORY_LOW_SHADOWS").ok().and_then(|v| parse_keep(&v));
         if let Some(n) = keep {
             tracing::warn!(keep = n, "M1LK_LOW_SHADOWS: shadow slices from {n} on are not drawn (lower picture quality)");
         }
-        keep
+        keep.unwrap_or(1)
     })
+}
+
+/// Slices of a shadow array kept, if the switch is on (a runtime switch,
+/// read per draw).
+fn keep() -> Option<u32> {
+    victory_core::switches::LOW_SHADOWS.is_on().then(keep_count)
 }
 
 /// Every rule of the file, if `M1LK_DRAW_RULES` names one. Logs how many.
@@ -120,7 +128,7 @@ fn rules() -> &'static [Rule] {
 
 /// Loads the switches and logs what is on. Safe to call more than once.
 pub(crate) fn init() {
-    let _ = keep();
+    let _ = keep_count();
     let _ = rules();
 }
 

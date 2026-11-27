@@ -7474,8 +7474,7 @@ mod fill_tests {
 /// The write-watch journal and the guards are behind their own locks, as
 /// they are for the title's threads.
 fn wide_refresh() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_REFRESH").is_some_and(|v| v == "1"))
+    victory_core::switches::WIDE_REFRESH.is_on()
 }
 
 /// Whether a submission's plain texture checks (`Step::Texture` without
@@ -7484,8 +7483,7 @@ fn wide_refresh() -> bool {
 /// A check moves from its step to the next write of ours or flush, never
 /// past one. Checks followed by an inline upload or copy stay in place.
 fn parallel_refresh() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_PARALLEL_REFRESH").is_some_and(|v| v == "1"))
+    victory_core::switches::PARALLEL_REFRESH.is_on()
 }
 
 /// A submission's refreshes not done yet, merged per buffer copy into the

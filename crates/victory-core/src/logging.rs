@@ -28,10 +28,37 @@ pub fn init(default_level: &str) {
         .with(filter)
         .with(
             tracing_subscriber::fmt::layer()
-                .with_target(true)
+                .event_format(Phased(tracing_subscriber::fmt::format().with_target(true)))
                 .with_writer(Lines::new()),
         )
         .try_init();
+}
+
+/// The usual line format; with a toggle schedule in use (`M1LK_TOGGLE_PLAN`)
+/// every line ends in `phase=<SWITCH>:<0|1>` (`phase=-` outside the plan).
+/// Lines are unchanged without a schedule.
+struct Phased<E>(E);
+
+impl<S, N, E> tracing_subscriber::fmt::FormatEvent<S, N> for Phased<E>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+    E: tracing_subscriber::fmt::FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        use std::fmt::Write;
+        if !crate::switches::plan_active() {
+            return self.0.format_event(ctx, writer, event);
+        }
+        let mut line = String::new();
+        self.0.format_event(ctx, tracing_subscriber::fmt::format::Writer::new(&mut line), event)?;
+        writeln!(writer, "{} phase={}", line.trim_end_matches('\n'), crate::switches::phase_tag())
+    }
 }
 
 /// Where log lines go: stderr, written by a thread of its own for info and

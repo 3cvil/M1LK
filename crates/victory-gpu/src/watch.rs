@@ -684,8 +684,7 @@ impl Uncommitted {
         if let Some(on) = TEST_RANGE_MEMO.with(std::cell::Cell::get) {
             return on;
         }
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var("VICTORY_RANGE_MEMO").is_ok_and(|v| v == "1"))
+        victory_core::switches::RANGE_MEMO.is_on()
     }
 
     fn end(&mut self, block: usize) -> usize {
@@ -730,6 +729,13 @@ static GUARDS: Mutex<Guards> = Mutex::new(Guards {
 
 fn guards() -> std::sync::MutexGuard<'static, Guards> {
     GUARDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The range memo switch was flipped (between two frames): what it kept is
+/// dropped, so a later flip back on starts from the kernel's answers.
+pub(crate) fn range_memo_flipped() {
+    let mut g = guards();
+    g.uncommitted.runs.clear();
 }
 
 /// For view memory: the pages of `[start, end)`'s blocks written since

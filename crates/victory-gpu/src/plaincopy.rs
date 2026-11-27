@@ -40,17 +40,20 @@ pub(crate) fn per_frame(frames: f64) -> [f64; 5] {
 pub(crate) unsafe fn copy(src: *const u8, dst: *mut u8, len: usize) -> bool {
     #[cfg(target_arch = "x86_64")]
     let path = {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| {
-            let on = std::env::var_os("VICTORY_COPY_PLAIN").is_some_and(|v| v == "1")
-                && x64::install();
-            if on {
-                tracing::info!(
-                    "VICTORY_COPY_PLAIN=1: host copies of 256 bytes or more read title memory in place, with a vectored fault handler falling back to ReadProcessMemory"
-                );
-            }
-            on
-        }) {
+        // A runtime switch (M1LK_COPY_PLAIN): the fault handler is installed
+        // the first time it is on and stays; off, copies go the old way.
+        static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if victory_core::switches::COPY_PLAIN.is_on()
+            && *INSTALLED.get_or_init(|| {
+                let on = x64::install();
+                if on {
+                    tracing::info!(
+                        "M1LK_COPY_PLAIN=1: host copies of 256 bytes or more read title memory in place, with a vectored fault handler falling back to ReadProcessMemory"
+                    );
+                }
+                on
+            })
+        {
             // SAFETY: the caller supplies the host buffer and the fault handler is installed.
             unsafe { x64::attempt(src, dst, len, &x64::FAULTS) }
         } else {

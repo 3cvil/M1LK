@@ -3399,8 +3399,13 @@ fn lookup_cache() -> bool {
     if let Some(on) = test_override() {
         return on;
     }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("VICTORY_LOOKUP_CACHE").is_ok_and(|v| v == "1"))
+    victory_core::switches::LOOKUP_CACHE.is_on()
+}
+
+/// The switch was flipped (between two frames): no thread's remembered answer
+/// may outlive it, so the tables' change count moves.
+pub(crate) fn lookup_cache_flipped() {
+    tables_changed();
 }
 
 #[cfg(test)]

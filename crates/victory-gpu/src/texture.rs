@@ -641,16 +641,8 @@ fn with_title<R>(memory: *const u8, size: usize, f: impl FnOnce(&[u8]) -> R) -> 
 /// (`VICTORY_SHORT_REMAP_LOCK=1`; off by default). Only the copying paths can
 /// do this: a read in place needs the pages to stay mapped throughout.
 fn short_remap_lock() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let on = std::env::var_os("VICTORY_SHORT_REMAP_LOCK").is_some_and(|v| v == "1");
-        if on {
-            tracing::info!(
-                "VICTORY_SHORT_REMAP_LOCK=1: texture reads through the copy release the remap lock                  right after the copy"
-            );
-        }
-        on
-    })
+    // A runtime switch (M1LK_SHORT_REMAP_LOCK), chosen per read.
+    victory_core::switches::SHORT_REMAP_LOCK.is_on()
 }
 
 /// [`with_title`] for a caller that holds a mapping guard: with
