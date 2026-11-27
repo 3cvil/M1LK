@@ -218,6 +218,9 @@ pub fn run(
     victory_loader::report_crashes();
     victory_loader::log_crashes_to(temp.with_file_name("crashes.log"));
     victory_hle::runtime::use_console_timers();
+    // The in-process sampling profiler (VICTORY_SAMPLE_PROF=1; off: nothing starts).
+    #[cfg(windows)]
+    victory_hle::runtime::start_sample_profiler();
     #[cfg(feature = "diagnostics")]
     diagnostics(&image, &cfg);
     let late = LateDlls {
@@ -237,6 +240,8 @@ pub fn run(
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
     println!("title exited with {code}");
+    #[cfg(windows)]
+    victory_hle::runtime::finish_sample_profiler();
     Ok(())
 }
 

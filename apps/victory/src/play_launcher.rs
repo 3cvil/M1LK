@@ -188,6 +188,8 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
     fs::write(logs.join(latest), path.display().to_string())?;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut child = Command::new(&runtime);
+    // The sampling profiler's report goes beside the run log.
+    child.env("VICTORY_SAMPLE_DIR", &logs);
     if let Some(on) = ray_tracing {
         child.env("VICTORY_RAY_TRACING", if on { "1" } else { "0" });
         writeln!(log, "Ray tracing requested: {}", if on { "on" } else { "off" })?;

@@ -59,6 +59,9 @@ jobs:
           # A build without the diagnostics feature has no scripted keys and is useless for a test run.
           $text = [IO.File]::ReadAllText((Join-Path $diag 'm1lk.exe'), [Text.Encoding]::ASCII)
           if (-not $text.Contains('VICTORY_KEYS')) { throw 'm1lk.exe was built without the diagnostics feature' }
+          # The debug files beside the exes: the sampling profiler (M1LK_SAMPLE_PROF=1) names functions from them.
+          foreach ($pdb in Get-ChildItem -LiteralPath $diag -Filter '*.pdb' -File) { Copy-Item -LiteralPath $pdb.FullName -Destination $out }
+          if (-not (Test-Path -LiteralPath (Join-Path $out 'm1lk.pdb'))) { Write-Warning 'm1lk.pdb was not produced' }
           Get-ChildItem $out | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName).Hash, $_.Name } |
             Set-Content (Join-Path $out 'SHA256SUMS.txt')
           "$env:GITHUB_SHA" | Set-Content (Join-Path $out 'COMMIT.txt')
