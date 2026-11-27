@@ -70,6 +70,7 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 41 | 2026-11-27 | CPU sampling profiler (where the ~215 ms frame goes, per thread and f... | 4.1 | 4.4 | 16.8 | 168 | unchecked | 43* | [chart](test-41.svg) |
 | 42 | 2026-11-27 | VIctory-NVIDIA snapshot (test/vnv-base), frame generation off, same s... | - | - | 5.4 | - | unchecked | - | [chart](test-42.svg) |
 | 43 | 2026-11-27 | VIctory-NVIDIA snapshot (test/vnv-base) rerun with a log file, frame... | - | - | 5.3 | - | unchecked | - | [chart](test-43.svg) |
-| 44 | 2026-11-27 | VIctory-NVIDIA snapshot, now with our save and settings copied into i... | 1.5 | 1.5 | 16.6 | 136 | unchecked | 22* | [chart](test-44.svg) |
+| 44 | 2026-11-27 | VIctory-NVIDIA snapshot, now with our save and settings copied into i... | 1.5 | 1.5 | 16.6 | 136 | white blocks/specks | 23* | [chart](test-44.svg) |
+| 45 | 2026-11-27 | VIctory-reloaded snapshot 9941051 (its own NVIDIA defaults): whole-bu... | 0.3 | 3.3 | 16.6 | 130 | unchecked | 40* | [chart](test-45.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
