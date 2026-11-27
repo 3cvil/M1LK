@@ -64,5 +64,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 35 | 2026-11-27 | round 1: ONE change on vs baseline: host copies read title memory in... | 4.3 | 4.5 | 17.4 | 136 | clean, faint smear | 42 | [chart](test-35.svg) |
 | 36 | 2026-11-27 | round 1: ONE change on vs baseline: remap lock released right after t... | 4.2 | 4.1 | 17.1 | 143 | dark, no artifacts named | 44 | [chart](test-36.svg) |
 | 37 | 2026-11-27 | round 1: ONE change on vs baseline: wider write-watch asks, one scan... | - | - | 3.7 | - | unchecked | - | [chart](test-37.svg) |
+| 38 | 2026-11-27 | round 1: ONE change on vs baseline: texture upload back-off under low... | 4.5 | 4.7 | 16.6 | 138 | unchecked | 43* | [chart](test-38.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
