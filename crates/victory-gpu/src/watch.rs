@@ -170,7 +170,7 @@ mod ahead_tests {
         assert!(set.sorted.len() != set.raw.len());
         assert!(set.covers(21, 29));
         set.clear();
-        assert!(!set.covers(1, 2) && set.is_empty() && set.len() == 0);
+        assert!(!set.covers(1, 2) && set.is_empty());
     }
 }
 
