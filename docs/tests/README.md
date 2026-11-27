@@ -104,5 +104,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 75 | 2026-11-27 | RAM: smaller host-copy windows (1 MiB grid) + 1.5 GB window budget vs... | 2.5 | 4 | 17.1 | 130 | unchecked | 43* | [chart](test-75.svg) |
 | 76 | 2026-11-27 | RAM: texture budget capped at 3.5 GB vs pour-off same exe | 2 | 4 | 17.3 | 143 | unchecked | 42* | [chart](test-76.svg) |
 | 77 | 2026-11-27 | STACK on: Rennet + COPY_PLAIN + Curd, A/B 1 - does a big CPU-prep cut... | 1.4 | 4 | 16.8 | 142 | unchecked | 42* | [chart](test-77.svg) |
+| 78 | 2026-11-27 | STACK off, same exe, A/B 1 - does a big CPU-prep cut move fps? | 1.6 | 4 | 16.4 | 146 | unchecked | 42* | [chart](test-78.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
