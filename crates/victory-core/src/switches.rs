@@ -17,6 +17,7 @@
 //! | `PARALLEL_REFRESH` | runtime | chosen per texture step; the batch runs whatever was gathered |
 //! | `INDIRECT_WINDOW` | runtime | recording state only; a window ends when the switch is off (default on) |
 //! | `LOOKUP_CACHE` | runtime | the tables' change count is bumped at a flip, so no thread keeps an old answer |
+//! | `SHADOW_RWLOCK` | runtime | both settings use the same `RwLock`; a flip only changes read versus write acquisition |
 //! | `RANGE_MEMO` | runtime | the memo is emptied at a flip (and already dropped each frame) |
 //! | `LOW_SHADOWS` | runtime | decided per draw; a skipped slice is only left cleared |
 //! | `WATCH_SCAN` | start-only | changes how write-watch askings are laid out and journalled for the whole run |
@@ -110,6 +111,7 @@ pub static WIDE_REFRESH: Switch = Switch::new("WIDE_REFRESH", true, is_one);
 pub static PARALLEL_REFRESH: Switch = Switch::new("PARALLEL_REFRESH", true, is_one);
 pub static INDIRECT_WINDOW: Switch = Switch::new("INDIRECT_WINDOW", true, not_zero);
 pub static LOOKUP_CACHE: Switch = Switch::new("LOOKUP_CACHE", true, is_one);
+pub static SHADOW_RWLOCK: Switch = Switch::new("SHADOW_RWLOCK", true, is_one);
 pub static RANGE_MEMO: Switch = Switch::new("RANGE_MEMO", true, is_one);
 pub static LOW_SHADOWS: Switch = Switch::new("LOW_SHADOWS", true, not_off_word);
 // Start-only: listed so a plan naming them is refused with a reason. Their
@@ -120,13 +122,14 @@ pub static INPLACE_CONSTANTS: Switch = Switch::new("INPLACE_CONSTANTS", false, i
 pub static GPU_DETILE: Switch = Switch::new("GPU_DETILE", false, is_one);
 
 /// Every switch, runtime-safe and start-only.
-pub static ALL: [&Switch; 12] = [
+pub static ALL: [&Switch; 13] = [
     &COPY_PLAIN,
     &SHORT_REMAP_LOCK,
     &WIDE_REFRESH,
     &PARALLEL_REFRESH,
     &INDIRECT_WINDOW,
     &LOOKUP_CACHE,
+    &SHADOW_RWLOCK,
     &RANGE_MEMO,
     &LOW_SHADOWS,
     &WATCH_SCAN,
