@@ -189,7 +189,12 @@ pub extern "system" fn XMemVirtualAlloc(
             "XMemVirtualAlloc"
         );
     }
-    if !at.is_null() && placeholder && constrained && flags & ADDRESS_32BIT != 0 {
+    // Not only placeholders: the title's 185 MB 32-bit graphics heap is
+    // reserved without 64 KiB pages (run ZCMdiag2: placeholder=false,
+    // flags=0x7), so it was never recorded and neither [`section_pages`]
+    // nor [`arrange`] ever saw it ("Scattered"). The list is read only
+    // while arranging is wanted, so this changes nothing otherwise.
+    if !at.is_null() && constrained && flags & ADDRESS_32BIT != 0 {
         LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).push((at as usize, size));
         tracing::info!(at = format_args!("{at:p}"), size, "M1LK ZCM: 32-bit graphics reservation recorded for arranging");
     } else if !at.is_null() && size >= 64 << 20 {
