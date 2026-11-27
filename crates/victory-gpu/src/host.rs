@@ -5775,6 +5775,7 @@ impl Host {
         let mut sparse_limit = None;
         for list in runs {
             let mut uploads = list.run_deferred(&mut batch);
+            let prelude_began = crate::prof::on().then(std::time::Instant::now);
             uploads.retain_mut(|upload| {
                 if upload.texture.sparse.is_none() {
                     return true;
@@ -5799,10 +5800,17 @@ impl Host {
                 }
             }
             lists.push(list.list.cast().ok());
+            if let Some(since) = prelude_began {
+                crate::prof::lap(crate::prof::S::Preludes, since);
+            }
         }
         // Only the recording runs concurrently. The GPU receives the
         // original ordered list array, after every worker has closed its list.
+        let prelude_began = crate::prof::on().then(std::time::Instant::now);
         record_preludes(plans);
+        if let Some(since) = prelude_began {
+            crate::prof::lap(crate::prof::S::Preludes, since);
+        }
         batch.check_textures();
         batch.flush();
         crate::watch::ask_once_end();
@@ -7155,7 +7163,10 @@ impl HostList {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
         let mut uploads = Vec::new();
+        // (M1LK Lactometer) Each step's time by kind (VICTORY_SUBMIT_PROF=1; inert otherwise).
+        let mut kinds = crate::prof::Steps::new();
         for step in &self.deferred().copies {
+            kinds.step(step.stage());
             let started = std::time::Instant::now();
             let copied = match step {
                 &Step::Copy(dst, src, len) => {
@@ -7322,6 +7333,22 @@ fn curd_fills() -> bool {
 }
 
 impl Step {
+    /// The profiler's stage of this kind of step (M1LK Lactometer). A refresh only joins the
+    /// batch here (its copy is [`crate::prof::S::Refresh`], wherever it is flushed): the
+    /// loop's own bookkeeping.
+    fn stage(&self) -> crate::prof::S {
+        use crate::prof::S;
+        match self {
+            Self::Copy(..) => S::StepCopy,
+            Self::Fill(_) | Self::Fills(_) => S::StepFill,
+            Self::Refresh(..) => S::StepLoop,
+            Self::Run(_) => S::StepRun,
+            Self::Host(_) => S::StepHost,
+            Self::GpuWrite(..) => S::StepGpuWrite,
+            Self::Texture { .. } | Self::SampledTexture(..) | Self::AheadTexture(..) => S::StepTexture,
+        }
+    }
+
     fn fills(&self) -> &[Fill] {
         match self {
             Self::Fill(fill) => std::slice::from_ref(fill),
@@ -7564,12 +7591,16 @@ impl Batch {
         let Some(at) = self.index.remove(&(std::sync::Arc::as_ptr(shadow) as usize)) else {
             return;
         };
+        let timed = crate::prof::on().then(std::time::Instant::now);
         let (shadow, from, to) = self.refreshes.swap_remove(at);
         // The last entry took its place.
         if let Some(moved) = self.refreshes.get(at) {
             self.index.insert(std::sync::Arc::as_ptr(&moved.0) as usize, at);
         }
         Self::update(&shadow, from, to);
+        if let Some(since) = timed {
+            crate::prof::refreshed(since.elapsed().as_micros() as u64);
+        }
     }
 
     /// Brings `[from, to)` of a copy up to date, timed.
@@ -7605,11 +7636,19 @@ impl Batch {
     /// threads (`crate::shadow::wide_run`), all done before it returns. Each
     /// check takes its texture's own lock. Fewer than two run inline.
     fn check_textures(&mut self) {
-        use std::sync::atomic::Ordering::Relaxed;
         if self.due_textures.is_empty() {
             return;
         }
+        let timed = crate::prof::on().then(std::time::Instant::now);
         let due = std::mem::take(&mut self.due_textures);
+        Self::run_checks(due);
+        if let Some(since) = timed {
+            crate::prof::nested(crate::prof::S::StepTexture, since.elapsed().as_micros() as u64);
+        }
+    }
+
+    fn run_checks(due: Vec<Box<dyn FnOnce() + Send>>) {
+        use std::sync::atomic::Ordering::Relaxed;
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| tracing::info!("texture checks run side by side (VICTORY_PARALLEL_REFRESH=1)"));
         if due.len() < 2 {
@@ -7629,6 +7668,14 @@ impl Batch {
 
     fn flush(&mut self) {
         self.check_textures();
+        let timed = (crate::prof::on() && !self.refreshes.is_empty()).then(std::time::Instant::now);
+        self.flush_refreshes();
+        if let Some(since) = timed {
+            crate::prof::refreshed(since.elapsed().as_micros() as u64);
+        }
+    }
+
+    fn flush_refreshes(&mut self) {
         self.index.clear();
         // One write-watch asking for the copies that lie close together,
         // not one per copy.

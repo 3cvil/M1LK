@@ -118,10 +118,12 @@ pub(crate) enum S {
     LateCardWait,
     /// `Host::execute_late`: landing finished flights (copies back to title memory).
     LateLand,
+    /// `Host::submit_part`: the runs' preludes, planned and recorded (sparse uploads with them).
+    Preludes,
 }
 
 /// Stages ([`S`]).
-const STAGES: usize = S::LateLand as usize + 1;
+const STAGES: usize = S::Preludes as usize + 1;
 
 /// Counts summed with the stages.
 #[derive(Clone, Copy)]
@@ -186,8 +188,72 @@ thread_local! {
 /// Refreshes took `micros` on this thread ([`S::Refresh`]).
 #[inline]
 pub(crate) fn refreshed(micros: u64) {
-    US[S::Refresh as usize].fetch_add(micros, Relaxed);
+    nested(S::Refresh, micros);
+}
+
+/// Work of `stage` that ran inside a deferred step took `micros` on this thread (the
+/// refreshes, the texture checks a write of the title's flushes): the step's own time has
+/// it taken out ([`refreshed_so_far`]).
+#[inline]
+pub(crate) fn nested(stage: S, micros: u64) {
+    US[stage as usize].fetch_add(micros, Relaxed);
     REFRESHED.with(|r| r.set(r.get() + micros));
+}
+
+/// (M1LK Lactometer) Times a list's deferred steps by kind: each step's time, less what
+/// nested work ([`nested`]) took inside it, goes to its kind's stage; the loop's own time
+/// beyond them to [`S::StepLoop`]. Inert (no clock read) with the profiler off.
+pub(crate) struct Steps {
+    began: Option<Instant>,
+    nested_at_start: u64,
+    /// The step being timed: its stage, its start, the nested time at its start.
+    current: Option<(S, Instant, u64)>,
+    parts: u64,
+    steps: u64,
+}
+
+impl Steps {
+    #[inline]
+    pub(crate) fn new() -> Steps {
+        let began = on().then(Instant::now);
+        let nested_at_start = if began.is_some() { refreshed_so_far() } else { 0 };
+        Steps { began, nested_at_start, current: None, parts: 0, steps: 0 }
+    }
+
+    /// A step of `stage` starts (the one before it ends).
+    #[inline]
+    pub(crate) fn step(&mut self, stage: S) {
+        if self.began.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        self.close(now);
+        self.current = Some((stage, now, refreshed_so_far()));
+        self.steps += 1;
+    }
+
+    fn close(&mut self, now: Instant) {
+        if let Some((stage, since, nested_then)) = self.current.take() {
+            let nested = refreshed_so_far().saturating_sub(nested_then);
+            let us = (now.saturating_duration_since(since).as_micros() as u64).saturating_sub(nested);
+            US[stage as usize].fetch_add(us, Relaxed);
+            self.parts += us;
+        }
+    }
+}
+
+impl Drop for Steps {
+    fn drop(&mut self) {
+        let Some(began) = self.began else {
+            return;
+        };
+        let now = Instant::now();
+        self.close(now);
+        let nested = refreshed_so_far().saturating_sub(self.nested_at_start);
+        let whole = (now.saturating_duration_since(began).as_micros() as u64).saturating_sub(nested);
+        US[S::StepLoop as usize].fetch_add(whole.saturating_sub(self.parts), Relaxed);
+        N[C::Steps as usize].fetch_add(self.steps, Relaxed);
+    }
 }
 
 /// The refresh microseconds this thread has run so far.
@@ -243,6 +309,7 @@ const NAMES: [&str; STAGES] = [
     "submit_build",
     "late_card_wait",
     "late_land",
+    "preludes",
 ];
 
 const COUNT_NAMES: [&str; COUNTS] = [
@@ -365,5 +432,20 @@ mod tests {
         all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), STAGES + COUNTS, "names are unique");
+    }
+
+    #[test]
+    fn steps_take_nested_time_out_and_are_inert_when_off() {
+        // Off (the variable is not set in tests): no clock, nothing added.
+        if !on() {
+            let mut steps = Steps::new();
+            steps.step(S::StepCopy);
+            assert!(steps.began.is_none() && steps.current.is_none() && steps.steps == 0);
+        }
+        // The nested counter is per thread and only grows.
+        let before = refreshed_so_far();
+        nested(S::StepTexture, 7);
+        refreshed(5);
+        assert_eq!(refreshed_so_far() - before, 12);
     }
 }
