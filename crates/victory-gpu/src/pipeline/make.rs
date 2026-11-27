@@ -188,6 +188,8 @@ const _: () = assert!(2 * DEFAULT_WAIT_MS < TITLE_WATCHDOG.as_millis() as u64);
 thread_local! {
     /// A test's own frame budget, on its thread alone.
     static TEST_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    /// A test's choice for [`compute_waits`], for its thread only.
+    static TEST_COMPUTE_WAIT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// What a frame may wait for one kind of pipeline while a world loads: they
@@ -257,9 +259,36 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     }
     if p.made.get().is_none() {
         start(p, REQUESTED);
-        wait(p, crate::frame::current());
+        if p.graphics.is_none() && compute_waits() {
+            // OnceLock waits for a worker already compiling this pipeline,
+            // or compiles it here if workers have not taken it yet. The
+            // ordinary shared frame budget cannot discard a compute dispatch.
+            p.make();
+        } else {
+            wait(p, crate::frame::current());
+        }
     }
     p.made.get()?.as_ref()
+}
+
+/// Whether a dispatch waits for its compute pipeline until it is made,
+/// whatever the frame's budget ([`wait_budget`]); a draw still waits within
+/// the budget and is dropped while its pipeline is not there.
+///
+/// A dropped draw is drawn again in the next frame. A dropped dispatch may
+/// not be: the title runs some compute passes once, when a scene changes,
+/// and what they leave is read for as long as the scene lasts. A wait of
+/// seconds once (the pipeline library has it on the next run) against a
+/// picture wrong until the scene ends. Off by default (`VICTORY_PIPELINE_COMPUTE_WAIT=1`
+/// turns it on; off is within the budget, as before).
+/// (Ported from MiniVI 2a1965f2, GPL-3.0.)
+fn compute_waits() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_COMPUTE_WAIT.get() {
+        return on;
+    }
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_COMPUTE_WAIT").is_some_and(|v| v == "1"))
 }
 
 /// Makes `p` on this thread if it is not made yet (waiting for a worker
@@ -698,6 +727,19 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
+    }
+
+    /// With the wait on, a compute pipeline is made on the requesting thread (no frame budget
+    /// can drop its dispatch): it is made when `ready` returns.
+    #[test]
+    fn a_dispatch_waits_for_its_compute_pipeline() {
+        super::TEST_COMPUTE_WAIT.set(Some(true));
+        super::TEST_BUDGET.set(Some(std::time::Duration::ZERO));
+        let p = Arc::new(Pending::new(Vec::new(), None));
+        assert!(ready(&p).is_none());
+        assert!(matches!(p.made.get(), Some(None)));
+        super::TEST_COMPUTE_WAIT.set(None);
+        super::TEST_BUDGET.set(None);
     }
 
     #[test]
