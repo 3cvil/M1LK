@@ -61,9 +61,9 @@ pub(crate) struct Shader {
     /// The first 8 bytes of its BLAKE3, as logged.
     pub(crate) hash: String,
     container: Vec<u8>,
-    /// A hair-strand program, left out ([`hair_strands`]).
+    /// The entry point of a hair-strand program, left out ([`hair_strands`]).
     #[cfg(windows)]
-    hair: bool,
+    hair: Option<&'static str>,
     /// What it is to the stand-in for the indirect light
     /// ([`crate::ambient`]), by its hash.
     #[cfg(windows)]
@@ -106,37 +106,61 @@ pub(crate) fn kept() -> [u64; 7] {
     ]
 }
 
-/// Whether a container's program is one of those that animate and draw hair
-/// strands, by its entry-point name (ported from the cool_fox fork). Some
-/// do not translate (an address from a phi), the rest drew lines across
-/// the screen. `VICTORY_HAIR` (any value) has them run, as before.
-/// shortcut: left out.
-#[cfg(windows)]
-fn hair_strands(container: &[u8]) -> bool {
-    static RUN: OnceLock<bool> = OnceLock::new();
-    const NAMES: [&[u8]; 18] = [
-        b"InterpolateStrand", b"HairStrand", b"CS_VisHair", b"PS_Smh", b"CS_InitSimBuffer",
-        b"CS_PreSkinSim", b"CS_SolvePer", b"CS_WavePerSpline", b"CS_EstimateStartPosition",
-        b"CS_CachePrev", b"CS_RestoreSimVelocity", b"CS_UpdatePosePosition",
-        b"CS_GenerateAccessories", b"CSGenerateHair", b"CS_CalculateFireVolumes",
-        b"CS_ProjDecalCut", b"CS_CullMaskPass", b"CS_LodBlend",
-    ];
-    if *RUN.get_or_init(|| std::env::var_os("VICTORY_HAIR").is_some()) {
-        return false;
-    }
+/// Entry points of the programs that animate and draw hair strands (ported
+/// from the cool_fox fork). Some do not translate (an address from a phi),
+/// the rest drew lines across the screen.
+#[cfg_attr(not(windows), allow(dead_code))]
+const HAIR_CORE: [&str; 14] = [
+    "InterpolateStrand", "HairStrand", "CS_VisHair", "PS_Smh", "CS_InitSimBuffer",
+    "CS_PreSkinSim", "CS_SolvePer", "CS_WavePerSpline", "CS_EstimateStartPosition",
+    "CS_CachePrev", "CS_RestoreSimVelocity", "CS_UpdatePosePosition",
+    "CS_GenerateAccessories", "CSGenerateHair",
+];
+
+/// Entry points the same list left out whose names do not say hair (fire
+/// volumes, decal cuts, cull masks, LOD blends): possibly general geometry.
+/// M1LK Strain (`VICTORY_STRAIN=1`): strains the hair filter down to
+/// [`HAIR_CORE`] and lets these run.
+#[cfg_attr(not(windows), allow(dead_code))]
+const HAIR_WIDE: [&str; 4] = ["CS_CalculateFireVolumes", "CS_ProjDecalCut", "CS_CullMaskPass", "CS_LodBlend"];
+
+/// The left-out entry point a container's program matches, by the name
+/// before each `_Wrapped`; with `strain` only [`HAIR_CORE`].
+#[cfg_attr(not(windows), allow(dead_code))]
+fn hair_entry(container: &[u8], strain: bool) -> Option<&'static str> {
     const END: &[u8] = b"_Wrapped";
+    let wide: &[&'static str] = if strain { &[] } else { &HAIR_WIDE };
     container
         .windows(END.len())
         .enumerate()
         .filter(|(_, w)| *w == END)
-        .any(|(at, _)| {
+        .find_map(|(at, _)| {
             let before = &container[at.saturating_sub(100)..at];
             let name = before
                 .rsplit(|b| !b.is_ascii_alphanumeric() && *b != b'_')
                 .next()
                 .unwrap_or_default();
-            NAMES.iter().any(|n| name.windows(n.len()).any(|w| w == *n))
+            HAIR_CORE.iter().chain(wide).copied().find(|n| name.windows(n.len()).any(|w| w == n.as_bytes()))
         })
+}
+
+/// The hair-strand entry point a container's program is, if it is left out
+/// ([`hair_entry`]). `VICTORY_HAIR` (any value) has them all run, as before.
+/// shortcut: left out.
+#[cfg(windows)]
+fn hair_strands(container: &[u8]) -> Option<&'static str> {
+    static MODE: OnceLock<(bool, bool)> = OnceLock::new();
+    let (run, strain) = *MODE.get_or_init(|| {
+        let strain = std::env::var_os("VICTORY_STRAIN").is_some_and(|v| v == "1");
+        if strain {
+            tracing::warn!("ARMED: M1LK_STRAIN - only hair-strand programs left out; fire volumes, decal cuts, cull masks and LOD blends run");
+        }
+        (std::env::var_os("VICTORY_HAIR").is_some(), strain)
+    });
+    if run {
+        return None;
+    }
+    hair_entry(container, strain)
 }
 
 /// The shared container for `bytes`.
@@ -181,7 +205,7 @@ pub fn warm(stage: &'static str, container: &[u8], compute: bool) -> (bool, Opti
 #[cfg(windows)]
 pub fn warm_selected(stage: &'static str, container: &[u8], compute: bool) -> Option<(bool, Option<bool>)> {
     let full = blake3::hash(container);
-    if hair_strands(container) {
+    if hair_strands(container).is_some() {
         return None;
     }
     // Not through the table, which lets nothing go.
@@ -189,7 +213,7 @@ pub fn warm_selected(stage: &'static str, container: &[u8], compute: bool) -> Op
         stage,
         hash: full.to_hex()[..16].to_owned(),
         container: container.to_vec(),
-        hair: false,
+        hair: None,
         ambient: None,
         translated: OnceLock::new(),
         ray_work: OnceLock::new(),
@@ -561,7 +585,7 @@ pub(crate) fn bound(this: This) {
 /// use starts that, see [`make`]).
 #[cfg(windows)]
 pub(crate) fn host_pipeline<'a>(this: This) -> Option<&'a host::HostPipeline> {
-    if this.is_null() || pipeline(this).shaders.iter().any(|shader| shader.hair) {
+    if this.is_null() || pipeline(this).shaders.iter().any(|shader| shader.hair.is_some()) {
         return None;
     }
     make::ready(&pipeline(this).host)
@@ -652,7 +676,7 @@ pub(crate) fn note_drop(this: This) {
         let p = pipeline(this);
         skipped_shader(p)
             .map(|hash| format!("skipped shader {hash}"))
-            .or_else(|| p.shaders.iter().any(|s| s.hair).then(|| "hair-strand program left out".to_owned()))
+            .or_else(|| p.shaders.iter().find_map(|s| s.hair).map(|n| format!("hair-strand program left out: {n}")))
             .or_else(|| make::missing(&p.host))
     };
     if let Some(why) = why {
@@ -949,6 +973,18 @@ pub fn save_pipeline_cache() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hair_entry_names_the_match_and_strain_spares_wide_names() {
+        let cull = b"\0CS_CullMaskPass_Wrapped\0";
+        assert_eq!(super::hair_entry(cull, false), Some("CS_CullMaskPass"));
+        assert_eq!(super::hair_entry(cull, true), None);
+        let strand = b"xx PS_Smh_Main_Wrapped yy";
+        assert_eq!(super::hair_entry(strand, false), Some("PS_Smh"));
+        assert_eq!(super::hair_entry(strand, true), Some("PS_Smh"));
+        assert_eq!(super::hair_entry(b"CS_CullMaskPass without the suffix", false), None);
+        assert_eq!(super::hair_entry(b"CS_Other_Wrapped", false), None);
+    }
+
     #[cfg(all(windows, feature = "diagnostics"))]
     #[test]
     fn skip_hashes_accepts_full_hashes_only() {
