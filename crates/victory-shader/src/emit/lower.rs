@@ -5258,6 +5258,27 @@ impl<'a> Lower<'a> {
         (self.s.m.select(c, any, at, first), any)
     }
 
+    /// `v_readfirstlane_b32`'s result `first` of `own` in a pixel shader:
+    /// a helper lane takes its own value instead (after upstream 0601955).
+    ///
+    /// On the console, whole-quad mode puts helper lanes in EXEC, so a
+    /// waterfall loop (read the first lane's value, run the lanes with that
+    /// value, take them out of EXEC) serves helper lanes too. On the host,
+    /// wave operations leave helper lanes out (DXIL without
+    /// `WaveOpsIncludeHelperLanes`): once only helper lanes are left in such
+    /// a loop, `WaveReadLaneFirst` reads no lane, no lane matches, and the
+    /// loop runs to the loop limit in every such lane. With its own value a
+    /// helper lane matches in the first pass and leaves; what a helper lane
+    /// computes only feeds derivatives, and its stores are dropped.
+    fn helper_reads_own(&mut self, own: V, first: V) -> V {
+        if !self.s.pixel {
+            return first;
+        }
+        let c = self.cur;
+        let helper = self.s.op(c, "isHelperLane.i1", Attr::ReadOnly, self.s.t.i1, 221, &[]);
+        self.s.m.select(c, helper, own, first)
+    }
+
     fn read_lane(&mut self, x: V, lane: V) -> V {
         self.s.op(
             self.cur,
@@ -8549,7 +8570,7 @@ impl<'a> Lower<'a> {
                         self.s.m.select(c, in_lo, lo, hi)
                     }
                 } else {
-                    mine
+                    self.helper_reads_own(a, mine)
                 };
                 int(self, r)
             }
@@ -9159,7 +9180,8 @@ impl<'a> Lower<'a> {
             let t = self.binary(35, a, lo);
             let t = self.binary(36, t, hi);
             let r = self.s.m.cast(c, Cast::FpToSi, t, i32t);
-            let nan = self.s.m.cmp(c, pred::UNO, a, a);
+            // on the bits: `fcmp uno` may be folded under fast-math (`is_nan_f32`)
+            let nan = self.is_nan_f32(a);
             let z = self.s.m.i32(0);
             let r = self.s.m.select(c, nan, z, r);
             return self.write_half(inst, r, guard);
@@ -9900,34 +9922,65 @@ impl<'a> Lower<'a> {
                 } else {
                     (self.fsrc(inst, 0)?, self.fsrc(inst, 1)?)
                 };
-                if op == "lg" {
-                    // Ordered and not equal, false for a NaN, as `olt | ogt`.
-                    // `fcmp one` means the same, but the AMD D3D12 driver
-                    // runs it as unordered (true for a NaN) where NVIDIA
-                    // and WARP do not; olt and ogt agree on all three.
-                    let lt = self.s.m.cmp(c, pred::OLT, a, b);
-                    let gt = self.s.m.cmp(c, pred::OGT, a, b);
-                    self.s.m.bin(c, Bin::Or, lt, gt)
-                } else {
+                // Every comparison that a NaN makes true (`u` and the `n`
+                // forms), and `o`, test NaN on the bits (`is_nan_f32`) and
+                // compare ordered otherwise: a driver that takes the
+                // operations that made `a` and `b` as never NaN may fold
+                // `fcmp uno` to false, `fcmp ord` to true and an unordered
+                // predicate to its ordered one, which loses the title's own
+                // NaN tests (v_cmp_u_f32 and friends, as `isnan` compiles).
+                // Ordered predicates mean the same either way.
+                // (shortcut: `a` and `b` read as f32; f16 sources are
+                // widened by `half_fsrc`, which keeps a NaN a NaN.)
+                let ordered = |l: &mut Self, op: &str| -> Option<V> {
                     let p = match op {
-                        "f" => pred::FALSE,
                         "lt" => pred::OLT,
                         "eq" => pred::OEQ,
                         "le" => pred::OLE,
                         "gt" => pred::OGT,
                         "ge" => pred::OGE,
-                        "o" => pred::ORD,
-                        "u" => pred::UNO,
-                        "nge" => pred::ULT,
-                        "nlg" => pred::UEQ,
-                        "ngt" => pred::ULE,
-                        "nle" => pred::UGT,
-                        "neq" => pred::UNE,
-                        "nlt" => pred::UGE,
-                        "tru" => pred::TRUE,
+                        "lg" => {
+                            // Ordered and not equal, false for a NaN, as `olt | ogt`.
+                            // `fcmp one` means the same, but the AMD D3D12 driver
+                            // runs it as unordered (true for a NaN) where NVIDIA
+                            // and WARP do not; olt and ogt agree on all three.
+                            let lt = l.s.m.cmp(c, pred::OLT, a, b);
+                            let gt = l.s.m.cmp(c, pred::OGT, a, b);
+                            return Some(l.s.m.bin(c, Bin::Or, lt, gt));
+                        }
+                        _ => return None,
+                    };
+                    Some(l.s.m.cmp(c, p, a, b))
+                };
+                if let Some(r) = ordered(self, op) {
+                    r
+                } else if op == "f" || op == "tru" {
+                    self.s.m.bool(op == "tru")
+                } else {
+                    let (na, nb) = (self.is_nan_f32(a), self.is_nan_f32(b));
+                    let nan = self.s.m.bin(c, Bin::Or, na, nb);
+                    // "not (a op b)": true for a NaN, else the opposite ordered test
+                    let opposite = match op {
+                        "o" | "u" => None,
+                        "nge" => Some("lt"),
+                        "nlg" => Some("eq"),
+                        "ngt" => Some("le"),
+                        "nle" => Some("gt"),
+                        "neq" => Some("lg"),
+                        "nlt" => Some("ge"),
                         _ => return Err(inst.name()),
                     };
-                    self.s.m.cmp(c, p, a, b)
+                    match opposite {
+                        None if op == "u" => nan,
+                        None => {
+                            let yes = self.s.m.bool(true);
+                            self.s.m.bin(c, Bin::Xor, nan, yes)
+                        }
+                        Some(o) => {
+                            let r = ordered(self, o).expect("an ordered comparison");
+                            self.s.m.bin(c, Bin::Or, r, nan)
+                        }
+                    }
                 }
             }
             "u64" | "i64" => {

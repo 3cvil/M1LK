@@ -2138,6 +2138,24 @@ mod barycentric_tests {
         let _ = shader;
     }
 
+    /// A pixel shader's `v_readfirstlane_b32` gives a helper lane its own
+    /// value (`isHelperLane`, SM 6.6): a waterfall loop left with helper
+    /// lanes only then ends instead of running to the loop limit. Lowered
+    /// and validated where dxil.dll is.
+    #[test]
+    fn a_pixel_first_lane_read_gives_a_helper_lane_its_own_value() {
+        let words = [
+            0x7E00_02F2u32, // v_mov_b32 v0, 1.0
+            0x7E00_0500,    // v_readfirstlane_b32 s0, v0
+            0x7E02_0200,    // v_mov_b32 v1, s0
+            0xF800_180F,
+            0x0101_0101, // exp mrt0 v1, v1, v1, v1 done vm
+            0xBF81_0000,
+        ];
+        let shader = pixel(&words, 0).unwrap();
+        validate(&shader);
+    }
+
     #[test]
     fn pixel_quad_swizzles_validate_and_dpp8_cannot_cross_quads() {
         let [e0, e1] = exp_mrt0(3);

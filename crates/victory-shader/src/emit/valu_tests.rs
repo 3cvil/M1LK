@@ -659,6 +659,59 @@ fn v_cmp_lg_is_false_for_nan() {
     }
 }
 
+/// The f32 compares a NaN makes true (`u`, the `n` forms) or false (`o`) are
+/// tested on the bits of the operands, not by `fcmp uno`, which a driver may
+/// fold: every f32 compare gives the ISA's answer for NaN operands too.
+#[test]
+fn v_cmp_f32_nan_forms_match_the_isa() {
+    let f = f32::to_bits;
+    let nan = f32::NAN.to_bits();
+    let pairs: [(u32, u32); 8] = [
+        (f(1.0), f(2.0)),
+        (f(2.0), f(1.0)),
+        (f(1.0), f(1.0)),
+        (nan, f(1.0)),
+        (f(1.0), nan),
+        (nan, nan),
+        (0x7F80_0001, f(0.0)), // a signalling NaN
+        (f32::INFINITY.to_bits(), f32::INFINITY.to_bits()),
+    ];
+    // (VOPC opcode, name, the answer for a, b)
+    type Want = fn(f32, f32) -> bool;
+    let ops: [(u16, &str, Want); 16] = [
+        (0x00, "f", |_, _| false),
+        (0x01, "lt", |a, b| a < b),
+        (0x02, "eq", |a, b| a == b),
+        (0x03, "le", |a, b| a <= b),
+        (0x04, "gt", |a, b| a > b),
+        (0x05, "lg", |a, b| a < b || a > b),
+        (0x06, "ge", |a, b| a >= b),
+        (0x07, "o", |a, b| !a.is_nan() && !b.is_nan()),
+        (0x08, "u", |a, b| a.is_nan() || b.is_nan()),
+        (0x09, "nge", |a, b| !(a >= b)),
+        (0x0A, "nlg", |a, b| !(a < b || a > b)),
+        (0x0B, "ngt", |a, b| !(a > b)),
+        (0x0C, "nle", |a, b| !(a <= b)),
+        (0x0D, "neq", |a, b| !(a == b)),
+        (0x0E, "nlt", |a, b| !(a < b)),
+        (0x0F, "tru", |_, _| true),
+    ];
+    let inputs: Vec<[u32; 4]> = pairs.iter().map(|&(a, b)| [a, b, 0, 0]).collect();
+    for (op, what, want) in ops {
+        let mut body = vop3(op, 20, vgpr(1), vgpr(2), 0x80).to_vec();
+        body.extend_from_slice(&vop3(0x101, 0, 0x80, 0x81, sgpr(20)));
+        let shader = build_valu_cs(&body);
+        run_cases(&shader, &inputs, |backend, i, inp, got| {
+            let expect = u32::from(want(f32::from_bits(pairs[i].0), f32::from_bits(pairs[i].1)));
+            assert_eq!(
+                got, expect,
+                "{backend}: v_cmp_{what}_f32({:#010x}, {:#010x}) = {got}, want {expect}",
+                inp[0], inp[1],
+            );
+        });
+    }
+}
+
 #[test]
 fn v_fract_f32_never_returns_one() {
     // v_fract_f32 v0, v1 (VOP1 opcode 0x020)
