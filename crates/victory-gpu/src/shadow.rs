@@ -1714,25 +1714,6 @@ impl Drop for Shadow {
     }
 }
 
-/// Whether a copy's snapshot is kept from one submission to the next and
-/// only the pieces that changed in between are taken again
-/// (`VICTORY_KEEP_SNAPSHOTS=1`; off by default).
-///
-/// A snapshot is the copy's bytes before a submission, to find what its
-/// shaders wrote. Taken anew for every submission it is 1,050 MB of copying
-/// a frame (72-86 ms in gameplay, runs 61 and 62) for buffers of which
-/// 100 MB changed. Kept, a piece of it is taken again only after something
-/// changed the copy there: a refresh from title memory ([`Shadow::copy`]),
-/// shader writes found after a submission, or the bytes put back then
-/// ([`Shadow::copy_back_with`]).
-///
-/// What it assumes, and why it is not on by default: that nothing else
-/// writes a copy. A shader that writes a buffer through a view we did not
-/// declare as written (we declare the unordered-access views of shaders
-/// that can store) changes the copy unseen; with a fresh snapshot that
-/// write is simply never put back, with a kept one it would be taken for a
-/// write of a later submission and put back then, over whatever the title
-/// wrote there since.
 /// M1LK ZCM Tell: the card's writes into title memory in place are told
 /// to the other copies of those bytes (placed textures, copies of buffers
 /// inside), as a copy-back tells them. `M1LK_ZCM_TELL=1`; off by default.
@@ -1776,6 +1757,25 @@ fn in_place_written_clips_and_joins_declared_ranges() {
     assert!(in_place_written(0x1000, 0x8000, &[(0x9000, 0xa000)]).is_empty());
 }
 
+/// Whether a copy's snapshot is kept from one submission to the next and
+/// only the pieces that changed in between are taken again
+/// (`VICTORY_KEEP_SNAPSHOTS=1`; off by default).
+///
+/// A snapshot is the copy's bytes before a submission, to find what its
+/// shaders wrote. Taken anew for every submission it is 1,050 MB of copying
+/// a frame (72-86 ms in gameplay, runs 61 and 62) for buffers of which
+/// 100 MB changed. Kept, a piece of it is taken again only after something
+/// changed the copy there: a refresh from title memory ([`Shadow::copy`]),
+/// shader writes found after a submission, or the bytes put back then
+/// ([`Shadow::copy_back_with`]).
+///
+/// What it assumes, and why it is not on by default: that nothing else
+/// writes a copy. A shader that writes a buffer through a view we did not
+/// declare as written (we declare the unordered-access views of shaders
+/// that can store) changes the copy unseen; with a fresh snapshot that
+/// write is simply never put back, with a kept one it would be taken for a
+/// write of a later submission and put back then, over whatever the title
+/// wrote there since.
 fn keeps() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_SNAPSHOTS").is_some_and(|v| v == "1"))
