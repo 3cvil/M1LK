@@ -89,5 +89,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 60 | 2026-11-27 | M1LK Strain: let 4 non-hair programs (cull masks, LOD blends, decal c... | 1.5 | 4.4 | 17.1 | 144 | unchecked | 41* | [chart](test-60.svg) |
 | 61 | 2026-11-27 | M1LK Strain OFF half (same exe as strain) | 1.5 | 3.9 | 17.2 | 129 | unchecked | 40* | [chart](test-61.svg) |
 | 62 | 2026-11-27 | ladder step 2: Watch Skip (repeat of ws-on, curd exe) | 1.8 | 4.3 | 16.4 | 139 | unchecked | 42* | [chart](test-62.svg) |
+| 63 | 2026-11-27 | ladder step 1: none (Watch Skip repeat OFF half, curd exe) | 2.1 | 4.2 | 16.6 | 158 | unchecked | 42* | [chart](test-63.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
