@@ -101,5 +101,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 72 | 2026-11-27 | M1LK Pour on (8 runs per chunk), A/B 1 | 1.8 | 3.8 | 16.7 | 136 | unchecked | 41* | [chart](test-72.svg) |
 | 73 | 2026-11-27 | M1LK Pour off, same exe, A/B 1 (also first Lactometer step timings) | 2.1 | 4 | 16.8 | 141 | unchecked | 42* | [chart](test-73.svg) |
 | 74 | 2026-11-27 | existing parallel prepare switches all on (wide refresh, parallel tex... | 2.4 | 4.2 | 16.4 | 136 | unchecked | 44* | [chart](test-74.svg) |
+| 75 | 2026-11-27 | RAM: smaller host-copy windows (1 MiB grid) + 1.5 GB window budget vs... | 2.5 | 4 | 17.1 | 130 | unchecked | 43* | [chart](test-75.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
