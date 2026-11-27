@@ -465,7 +465,7 @@ fn quiet(j: &Journal, first: usize, last: usize, taken: &[u64]) -> bool {
 
 #[cfg(test)]
 mod quiet_tests {
-    use super::{Journal, quiet};
+    use super::{Journal, MAX_REASKS, quiet, reask_due};
 
     fn journal(ahead: &[(usize, usize)], written: &[(usize, u64)]) -> Journal {
         Journal { ahead: ahead.to_vec(), written: written.iter().copied().collect(), ..super::EMPTY_JOURNAL }
