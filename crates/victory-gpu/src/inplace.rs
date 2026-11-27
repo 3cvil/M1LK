@@ -138,10 +138,17 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
     if level() < if window { 1 } else { 2 } {
         return None;
     }
-    // View memory: known from the runtime without asking Windows.
+    // View memory (the page pool): its section is reserved and its views
+    // move, so `place_part` turns it down. A heap opened on a view of OUR
+    // own of the same section pages takes it instead ([`place_view`]), as
+    // renderer port #1 and the constants heap do for the 32-bit graphics
+    // heap. Known from the runtime without asking Windows.
     if cover(start as usize, len as usize) != Cover::None {
-        STATS[4].fetch_add(1, Ordering::Relaxed);
-        return None;
+        let placed = place_view(start, len, window)?;
+        let at = if window { 0 } else { 2 };
+        STATS[at].fetch_add(1, Ordering::Relaxed);
+        STATS[at + 1].fetch_add(len, Ordering::Relaxed);
+        return Some(placed);
     }
     if STATS[1].load(Ordering::Relaxed) + STATS[3].load(Ordering::Relaxed) + len > most() {
         STATS[6].fetch_add(1, Ordering::Relaxed);
@@ -192,6 +199,9 @@ pub(crate) fn gone(window: bool, bytes: u64) {
 pub fn title_memory_freeing(at: usize, len: usize) {
     // Renderer port 1's regions there: no longer what the title shows.
     crate::port::forget(at, len);
+    // General view-memory regions over it show the pages the title had
+    // there, not those it maps now: the next ask opens the memory anew.
+    view_forget(at as u64, len as u64);
     // A region of the constants heap over it shows the pages the title had
     // there, not those it maps now: the next ask opens the memory anew.
     constants_forget(at as u64, len as u64);
@@ -222,6 +232,209 @@ fn say() {
         s[5],
         s[6],
         s[7]
+    );
+}
+
+// General view memory in place (`M1LK_INPLACE`/`VICTORY_INPLACE`): title
+// view memory (the page pool) that is one run of a section, in a host heap
+// opened on a view of OUR own of the same section pages, the way renderer
+// port #1 (`crate::port`) and the constants heap do for the 32-bit graphics
+// heap. This is the ~870 pieces `place_part` turns down: their section is
+// made reserved (`SEC_RESERVE`) and their views move, so neither
+// `OpenExistingHeapFromFileMapping` nor a heap on the title's own view
+// would do. A region is opened over the asked buffer's own 64 KiB pages
+// (not the whole section run), so no region spans pages another title
+// buffer already copied; later asks for pages a region holds reuse it.
+
+/// A region of title view memory opened as a heap through a view of ours.
+struct ViewRegion {
+    start: u64,
+    end: u64,
+    heap: ID3D12Heap,
+}
+
+static VIEW_REGIONS: Mutex<Vec<ViewRegion>> = Mutex::new(Vec::new());
+
+/// How many regions there are, for a look without the lock on
+/// [`title_memory_freeing`]'s path.
+static VIEW_ALIVE: AtomicU64 = AtomicU64::new(0);
+
+/// Lowest start and highest end of live regions (both 0: none), for a cheap
+/// reject on [`title_memory_freeing`]'s path.
+static VIEW_BOUNDS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Since the start: regions opened, their bytes; windows placed, buffers
+/// placed; turned down because the memory is not one run of a section,
+/// because the host would not give or open a view of ours (or no buffer
+/// could be placed), because the run does not start on a 64 KiB section
+/// boundary (it crosses one), because opening more would pass
+/// `M1LK_INPLACE_MB`; regions forgotten because the title mapped other
+/// pages there.
+static VSTATS: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+
+/// Whether a region `[r_start, r_end)` holds all of `[at, end)`.
+fn region_holds(r_start: u64, r_end: u64, at: u64, end: u64) -> bool {
+    r_start <= at && end <= r_end
+}
+
+/// Whether a region `[r_start, r_end)` overlaps `[at, end)`: it must be
+/// forgotten when that range is remapped.
+fn region_overlaps(r_start: u64, r_end: u64, at: u64, end: u64) -> bool {
+    r_start < end && at < r_end
+}
+
+/// Title view memory `[start, start + len)` placed in a region opened on a
+/// view of ours, if it is one run of a section. `None` leaves the caller to
+/// make a copy, as before; the reason is counted (and said a few times).
+/// Does not touch [`STATS`]: [`place_for`] counts the placement so that
+/// [`gone`] balances it.
+fn place_view(start: u64, len: u64, window: bool) -> Option<Placed> {
+    let host = crate::host::host()?;
+    match view_place(&host.device, start, len) {
+        Ok(placed) => {
+            VSTATS[if window { 2 } else { 3 }].fetch_add(1, Ordering::Relaxed);
+            Some(placed)
+        }
+        Err((stat, why)) => {
+            if VSTATS[stat].fetch_add(1, Ordering::Relaxed) < 8 {
+                tracing::warn!(start = format_args!("{start:#x}"), len, window, why, "title view memory not in place: a copy as before (M1LK_INPLACE)");
+            }
+            None
+        }
+    }
+}
+
+/// [`place_view`]'s work on `device`: the region holding the buffer's pages,
+/// opened if none does and the cap allows, and a buffer placed in it. `Err`
+/// with the statistic to count and why.
+fn view_place(device: &ID3D12Device, start: u64, len: u64) -> Result<Placed, (usize, String)> {
+    let (at, end) = pages_of_range(start, len);
+    let mut regions = VIEW_REGIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let i = match regions.iter().position(|r| region_holds(r.start, r.end, at, end)) {
+        Some(i) => i,
+        None => {
+            // Opening locks the region's pages into the PC's memory, also
+            // those the title never touched: keep the lot under the cap.
+            let live: u64 = regions.iter().map(|r| r.end - r.start).sum();
+            if live + (end - at) > most() {
+                return Err((7, format!("{} MB in section-view regions already, M1LK_INPLACE_MB is {} MB", live >> 20, most() >> 20)));
+            }
+            let region = view_open(device, at, end)?;
+            VSTATS[0].fetch_add(1, Ordering::Relaxed);
+            VSTATS[1].fetch_add(region.end - region.start, Ordering::Relaxed);
+            regions.push(region);
+            VIEW_ALIVE.store(regions.len() as u64, Ordering::Relaxed);
+            view_bounds(&regions);
+            regions.len() - 1
+        }
+    };
+    let region = &regions[i];
+    let buffer = place(device, &region.heap, at - region.start, end - at).map_err(|e| (5, format!("no buffer placed in the region: {e}")))?;
+    // SAFETY: a live buffer.
+    let gpu = unsafe { buffer.GetGPUVirtualAddress() } + (start - at);
+    Ok(Placed { buffer, heap: region.heap.clone(), gpu, bias: start - at })
+}
+
+/// Opens `[at, end)` (64 KiB aligned title view memory, one run of a
+/// section) as a heap through a view of ours of the same section pages.
+/// Opening locks the pages into the PC's memory (the title's views have
+/// committed them already). The view of ours is never unmapped (a view a
+/// live heap stands on cannot be): a region's bytes of address space each
+/// time the title maps other pages over one.
+fn view_open(device: &ID3D12Device, at: u64, end: u64) -> Result<ViewRegion, (usize, String)> {
+    let bytes = (end - at) as usize;
+    // The heap needs the pages committed; lazy ones are, through the title's
+    // addresses (`VICTORY_LAZY_COMMIT`).
+    crate::lazy::ensure(at as usize, bytes);
+    let (section, offset) = match cover(at as usize, bytes) {
+        Cover::Run(section, offset) => (section, offset),
+        other => return Err((4, format!("not one run of a section: {other:?}"))),
+    };
+    if !offset.is_multiple_of(K64 as u64) {
+        return Err((6, format!("the run starts at {offset:#x} of its section, not on a 64 KiB boundary")));
+    }
+    // SAFETY: the section of a view the title has (the runtime keeps its
+    // handle while views of it are mapped; a view keeps the section alive
+    // after that); the range lies in the run.
+    let view = unsafe { mem::MapViewOfFile(section as *mut c_void, mem::FILE_MAP_WRITE, (offset >> 32) as u32, offset as u32, bytes) }.Value;
+    if view.is_null() {
+        return Err((5, format!("no view of ours: {}", std::io::Error::last_os_error())));
+    }
+    let unmap = || {
+        // SAFETY: our own view, nothing opened on it.
+        unsafe { mem::UnmapViewOfFile(mem::MEMORY_MAPPED_VIEW_ADDRESS { Value: view }) };
+    };
+    // The title's views committed these section pages when they were mapped;
+    // asked once more through ours (a reserved section's pages are committed
+    // through a view), which changes nothing if they already are.
+    // SAFETY: inside our own view.
+    if unsafe { mem::VirtualAlloc(view, bytes, mem::MEM_COMMIT, mem::PAGE_READWRITE) }.is_null() {
+        let error = std::io::Error::last_os_error();
+        unmap();
+        return Err((5, format!("the view of ours not committed: {error}")));
+    }
+    match open(device, From::Part(view as usize, bytes)) {
+        Ok(heap) => Ok(ViewRegion { start: at, end, heap }),
+        Err(e) => {
+            unmap();
+            Err((5, format!("refused by the host: {e}")))
+        }
+    }
+}
+
+fn view_bounds(regions: &[ViewRegion]) {
+    let lo = regions.iter().map(|r| r.start).min().unwrap_or(0);
+    let hi = regions.iter().map(|r| r.end).max().unwrap_or(0);
+    VIEW_BOUNDS[0].store(lo, Ordering::Relaxed);
+    VIEW_BOUNDS[1].store(hi, Ordering::Relaxed);
+}
+
+/// The title maps other pages at `[at, at + len)`: the regions over it are
+/// forgotten (what is placed in them is let go by [`title_memory_freeing`]).
+fn view_forget(at: u64, len: u64) {
+    if VIEW_ALIVE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let end = at.saturating_add(len);
+    if VIEW_BOUNDS[1].load(Ordering::Relaxed) <= at || VIEW_BOUNDS[0].load(Ordering::Relaxed) >= end {
+        return;
+    }
+    let mut regions = VIEW_REGIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let before = regions.len();
+    regions.retain(|r| !region_overlaps(r.start, r.end, at, end));
+    VSTATS[8].fetch_add((before - regions.len()) as u64, Ordering::Relaxed);
+    VIEW_ALIVE.store(regions.len() as u64, Ordering::Relaxed);
+    view_bounds(&regions);
+}
+
+/// The line of the general view memory in place, every ten seconds while
+/// [`level`] is on (called by [`tick`]).
+fn view_say() {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    let last = LAST.load(Ordering::Relaxed);
+    if now < last + 10_000 || LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return;
+    }
+    let s: Vec<u64> = VSTATS.iter().map(|s| s.load(Ordering::Relaxed)).collect();
+    let (alive, bytes) = {
+        let regions = VIEW_REGIONS.lock().unwrap_or_else(|e| e.into_inner());
+        (regions.len(), regions.iter().map(|r| r.end - r.start).sum::<u64>())
+    };
+    tracing::info!(
+        "title view memory in place (M1LK_INPLACE): {alive} section-view regions {} MB (opened so far {}, {} MB), {} windows and {} title buffers placed in them \
+         (no host copy, nothing sent up, hashed, compared or fetched back for them); turned down: {} not one run of a section, {} host would not give or open a view \
+         of ours, {} run crosses a 64 KiB section boundary, {} over M1LK_INPLACE_MB; {} regions forgotten because the title mapped other pages there",
+        bytes >> 20,
+        s[0],
+        s[1] >> 20,
+        s[2],
+        s[3],
+        s[4],
+        s[5],
+        s[6],
+        s[7],
+        s[8]
     );
 }
 
@@ -1548,6 +1761,7 @@ fn real_part(spans: &[(u64, u64, bool)]) -> Vec<String> {
 pub(crate) fn tick() {
     if level() > 0 {
         say();
+        view_say();
     }
     if constants_on() {
         constants_say();
@@ -1641,6 +1855,30 @@ pub(crate) mod tests {
         assert_eq!(stretch_in(&views, at + 5 * K64, 2 * K64), None, "into the other section");
         assert_eq!(stretch_in(&views, at + 6 * K64, K64), Some((at + 6 * K64, K64, 8, 16 * K64 as u64)));
         assert_eq!(stretch_in(&views, at + 7 * K64, K64), None, "the gap");
+    }
+
+    /// A section-view region holds only ranges inside it; a later ask for
+    /// such a range reuses it instead of opening another.
+    #[test]
+    fn a_view_region_holds_only_ranges_within_it() {
+        assert!(region_holds(0x1000, 0x5000, 0x1000, 0x5000), "the whole region");
+        assert!(region_holds(0x1000, 0x5000, 0x2000, 0x3000), "a part inside");
+        assert!(!region_holds(0x1000, 0x5000, 0x0800, 0x2000), "starts before");
+        assert!(!region_holds(0x1000, 0x5000, 0x4000, 0x6000), "ends after");
+        assert!(!region_holds(0x1000, 0x5000, 0x5000, 0x6000), "wholly after");
+    }
+
+    /// A region is forgotten exactly when the remapped range overlaps it;
+    /// touching at a boundary is not an overlap.
+    #[test]
+    fn a_view_region_is_forgotten_only_when_the_remap_overlaps_it() {
+        assert!(region_overlaps(0x1000, 0x5000, 0x4000, 0x8000), "overlaps the tail");
+        assert!(region_overlaps(0x1000, 0x5000, 0x0000, 0x2000), "overlaps the head");
+        assert!(region_overlaps(0x1000, 0x5000, 0x2000, 0x3000), "inside");
+        assert!(region_overlaps(0x1000, 0x5000, 0x0000, 0x9000), "covers it");
+        assert!(!region_overlaps(0x1000, 0x5000, 0x5000, 0x9000), "touches the end");
+        assert!(!region_overlaps(0x1000, 0x5000, 0x0000, 0x1000), "touches the start");
+        assert!(!region_overlaps(0x1000, 0x5000, 0x8000, 0x9000), "well clear");
     }
 
     /// What the runtime forgets when memory is mapped anew.
