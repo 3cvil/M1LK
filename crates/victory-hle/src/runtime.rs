@@ -332,17 +332,28 @@ pub fn title() -> Title {
 /// a desktop process waits in 15.6 ms ticks unless it asks for finer ones,
 /// and Windows 11 drops that request while the window is hidden unless the
 /// process opts out. Process-wide, for the whole run.
+///
+/// Also opts out of execution-speed throttling (EcoQoS), so Windows does not
+/// park the title's threads on efficiency cores when the window loses focus.
+/// `M1LK_NO_ECOQOS=0` leaves that part off.
 #[cfg(windows)]
 pub fn use_console_timers() {
     use windows_sys::Win32::Media::timeBeginPeriod;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
-        ProcessPowerThrottling, SetProcessInformation,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
     };
+    static NO_ECOQOS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let no_ecoqos =
+        *NO_ECOQOS.get_or_init(|| std::env::var("M1LK_NO_ECOQOS").map_or(true, |v| v != "0"));
+    let mut mask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    if no_ecoqos {
+        mask |= PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    }
     let keep = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        ControlMask: mask,
         StateMask: 0,
     };
     // SAFETY: plain process settings; `keep` outlives the call.

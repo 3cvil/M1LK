@@ -39,7 +39,8 @@ jobs:
           shared-key: diag
       - name: Build
         env:
-          RUSTFLAGS: --cfg m1lk_external_tables
+          # RUSTFLAGS replaces .cargo/config.toml rustflags, so the cpu level is repeated here.
+          RUSTFLAGS: --cfg m1lk_external_tables -C target-cpu=x86-64-v3
         run: cargo build --profile diag -p victory --features diagnostics --locked
       - name: Check and collect the binaries
         id: collect
