@@ -120,8 +120,32 @@ impl Reader<'_> {
 
 impl Tables {
     /// The tables M1LK ships with.
+    #[cfg(not(m1lk_external_tables))]
     pub fn builtin() -> Result<Tables, Error> {
         Tables::parse(include_bytes!("bcpack-tables.bin"))
+    }
+
+    /// Public CI builds (`--cfg m1lk_external_tables`) do not embed the table
+    /// file, so the published binaries carry no third-party data. They read it
+    /// at run time from `VICTORY_BCPACK_TABLES` or `bcpack-tables.bin` beside
+    /// the executable.
+    #[cfg(m1lk_external_tables)]
+    pub fn builtin() -> Result<Tables, Error> {
+        static BYTES: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+        let bytes = BYTES.get_or_init(|| {
+            let path = std::env::var_os("VICTORY_BCPACK_TABLES")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| exe.parent().map(|dir| dir.join("bcpack-tables.bin")))
+                })?;
+            std::fs::read(path).ok()
+        });
+        match bytes {
+            Some(bytes) => Tables::parse(bytes),
+            None => Err(Error("no bcpack-tables.bin beside the executable (external-tables build)")),
+        }
     }
 
     /// Reads the table file: 128 x 9 u16 model frequencies (per bucket, the

@@ -47,6 +47,8 @@ opus-pure = "0.2.4"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
+# m1lk_external_tables: CI builds that must not carry the BCPack format tables (see bcpack.rs)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(m1lk_external_tables)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

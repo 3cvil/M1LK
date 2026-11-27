@@ -29,9 +29,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - name: Prepare verified BCPack format tables
-        shell: pwsh
-        run: ./Initialize-FormatTables.ps1
+      # No format tables are fetched here: this build embeds none (cfg m1lk_external_tables) and reads
+      # bcpack-tables.bin from beside the exe at run time, so the artifact carries no third-party data.
       # The version and components pinned in rust-toolchain.toml.
       - run: rustup toolchain install
       # Swatinem/rust-cache v2
@@ -39,6 +38,8 @@ jobs:
         with:
           shared-key: diag
       - name: Build
+        env:
+          RUSTFLAGS: --cfg m1lk_external_tables
         run: cargo build --profile diag -p victory --features diagnostics --locked
       - name: Check and collect the binaries
         id: collect
