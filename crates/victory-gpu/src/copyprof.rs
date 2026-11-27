@@ -65,6 +65,7 @@ pub(crate) enum Slot {
     /// GetWriteWatch calls that failed (memory not write-watched, or a
     /// merged range across reservations), wherever made; inside `writes`,
     /// `ask_ahead` or `ask_once*`.
+    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))] // only built by diagnostics builds
     WatchFailed,
 }
 
@@ -116,6 +117,7 @@ impl Timer {
 }
 
 /// A failed GetWriteWatch call that took `took`.
+#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))] // only called by diagnostics builds
 pub(crate) fn failed(took: std::time::Duration) {
     if on() {
         let c = &CELLS[Slot::WatchFailed as usize];

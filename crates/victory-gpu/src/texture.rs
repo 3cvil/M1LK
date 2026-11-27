@@ -1423,12 +1423,12 @@ impl Staging {
     /// texture has one and the card's buffers can be made, else a slot.
     fn new_sampled_upload(&self) -> Option<upload::Upload> {
         let host = host()?;
-        if let Some(gpu) = &self.gpu {
-            if let Some(upload) = upload::Upload::new_gpu(host, gpu.raw.bytes, self.bytes) {
-                // SAFETY: a buffer of at least `raw.bytes` nothing else holds.
-                unsafe { crate::gpudetile::write_tables(&self.layout, &gpu.raw, upload.data()) };
-                return Some(upload);
-            }
+        if let Some(gpu) = &self.gpu
+            && let Some(upload) = upload::Upload::new_gpu(host, gpu.raw.bytes, self.bytes)
+        {
+            // SAFETY: a buffer of at least `raw.bytes` nothing else holds.
+            unsafe { crate::gpudetile::write_tables(&self.layout, &gpu.raw, upload.data()) };
+            return Some(upload);
         }
         upload::Upload::new(host, self.bytes)
     }

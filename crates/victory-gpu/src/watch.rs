@@ -87,7 +87,7 @@ pub(crate) fn scan() -> bool {
         let on = std::env::var_os("VICTORY_WATCH_SCAN").is_some_and(|v| v == "1");
         if on {
             tracing::info!(
-                gap_mb = ahead_gap() * PAGE >> 20,
+                gap_mb = (ahead_gap() * PAGE) >> 20,
                 "write-watch scans: wide askings, one scan a window (VICTORY_WATCH_SCAN=1)"
             );
         }

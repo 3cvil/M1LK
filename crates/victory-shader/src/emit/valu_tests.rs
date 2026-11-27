@@ -662,6 +662,8 @@ fn v_cmp_lg_is_false_for_nan() {
 /// The f32 compares a NaN makes true (`u`, the `n` forms) or false (`o`) are
 /// tested on the bits of the operands, not by `fcmp uno`, which a driver may
 /// fold: every f32 compare gives the ISA's answer for NaN operands too.
+// NaN compare semantics are the point: negated float compares stay as written.
+#[allow(clippy::neg_cmp_op_on_partial_ord, clippy::nonminimal_bool)]
 #[test]
 fn v_cmp_f32_nan_forms_match_the_isa() {
     // The lowering is opt-in (VICTORY_NAN_COMPARE_BITS=1); the default keeps the old behaviour.
@@ -688,12 +690,12 @@ fn v_cmp_f32_nan_forms_match_the_isa() {
         (0x02, "eq", |a, b| a == b),
         (0x03, "le", |a, b| a <= b),
         (0x04, "gt", |a, b| a > b),
-        (0x05, "lg", |a, b| a < b || a > b),
+        (0x05, "lg", |a, b| (a < b) || (a > b)),
         (0x06, "ge", |a, b| a >= b),
         (0x07, "o", |a, b| !a.is_nan() && !b.is_nan()),
         (0x08, "u", |a, b| a.is_nan() || b.is_nan()),
         (0x09, "nge", |a, b| !(a >= b)),
-        (0x0A, "nlg", |a, b| !(a < b || a > b)),
+        (0x0A, "nlg", |a, b| !((a < b) || (a > b))),
         (0x0B, "ngt", |a, b| !(a > b)),
         (0x0C, "nle", |a, b| !(a <= b)),
         (0x0D, "neq", |a, b| !(a == b)),
