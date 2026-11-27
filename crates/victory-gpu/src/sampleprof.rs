@@ -451,6 +451,9 @@ mod imp {
         symbols: Option<Symbols>,
     }
 
+    // SAFETY: the handles are process-wide values any thread may use; the state is behind a mutex.
+    unsafe impl Send for State {}
+
     static STATE: std::sync::Mutex<State> = std::sync::Mutex::new(State { targets: Vec::new(), symbols: None });
     static STARTED: AtomicBool = AtomicBool::new(false);
 
