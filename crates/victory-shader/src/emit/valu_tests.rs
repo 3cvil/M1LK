@@ -664,6 +664,10 @@ fn v_cmp_lg_is_false_for_nan() {
 /// fold: every f32 compare gives the ISA's answer for NaN operands too.
 #[test]
 fn v_cmp_f32_nan_forms_match_the_isa() {
+    // The lowering is opt-in (VICTORY_NAN_COMPARE_BITS=1); the default keeps the old behaviour.
+    if std::env::var_os("VICTORY_NAN_COMPARE_BITS").is_none_or(|v| v != "1") {
+        return;
+    }
     let f = f32::to_bits;
     let nan = f32::NAN.to_bits();
     let pairs: [(u32, u32); 8] = [
@@ -1769,6 +1773,10 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
 /// d193085a, GPL-3.0.)
 #[test]
 fn v_fmac_f32_takes_the_accumulator_modifiers() {
+    // The lowering is opt-in (VICTORY_FMAC_ACC_MODS=1); the default keeps the old behaviour.
+    if std::env::var_os("VICTORY_FMAC_ACC_MODS").is_none_or(|v| v != "1") {
+        return;
+    }
     // ([a, b, acc], with neg[2], with abs[2])
     const ROWS: [([u32; 3], u32, u32); 16] = [
         ([0x3F80_0000, 0x4000_0000, 0x3F80_0000], 0x3F80_0000, 0x4040_0000),

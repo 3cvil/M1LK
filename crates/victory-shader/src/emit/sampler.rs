@@ -33,6 +33,14 @@ pub struct StaticSampler {
 // The floats come from fixed-point fields: never NaN.
 impl Eq for StaticSampler {}
 
+/// `VICTORY_CMP_SAMPLER_FIX=1`: a comparison sampler replaces the reduction bits (see
+/// [`StaticSampler::make_comparison`]). Off by default (OR in 0x80, as before). Part of the
+/// shader cache key.
+pub fn comparison_fix() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CMP_SAMPLER_FIX").is_some_and(|v| v == "1"))
+}
+
 impl StaticSampler {
     /// Makes this a comparison sampler. D3D12 keeps the reduction in filter
     /// bits 7-8 (0 standard, 1 comparison, 2 minimum, 3 maximum), so the

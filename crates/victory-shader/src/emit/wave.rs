@@ -157,11 +157,11 @@ impl Section {
     }
 }
 
-/// `VICTORY_SECTION_SCAN_CONT=0`: the section scan of a block ends at its first saveexec with no
-/// restore in the block, as before. Part of the shader cache key (`victory-gpu`'s).
+/// `VICTORY_SECTION_SCAN_CONT=1`: the section scan of a block goes on past a saveexec with no
+/// restore in the block. Off by default: it ends there, as before. Part of the shader cache key (`victory-gpu`'s).
 fn scan_continues() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_SECTION_SCAN_CONT").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SECTION_SCAN_CONT").is_some_and(|v| v == "1"))
 }
 
 /// Every whole-wave section of `block`, by start index.

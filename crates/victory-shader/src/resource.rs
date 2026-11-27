@@ -421,6 +421,14 @@ type Known = Vec<(Bool, bool)>;
 
 const MAX_ROUNDS: usize = 64;
 const MAX_JOINS: usize = 8;
+
+/// `VICTORY_GUARD_TRACE=1`: a descriptor read at a join is traced only over the lanes whose
+/// EXEC guard lets them run it. Off by default (every lane that reaches the access, as before).
+/// Part of the shader cache key.
+fn guard_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_GUARD_TRACE").is_some_and(|v| v == "1"))
+}
 /// VGPR values followed for one dword of a descriptor kept per lane.
 const MAX_COPIES: usize = 64;
 
@@ -1128,7 +1136,7 @@ impl<'a> Tracer<'a> {
         let mut known = Vec::new();
         if let Some(l) = self.lanes {
             known.push((l.reach[at.0], true));
-            if let Some(guard) = l.guards[at.0][at.1] {
+            if let Some(guard) = l.guards[at.0][at.1].filter(|_| guard_trace()) {
                 known.push((guard, true));
             }
         }
@@ -1287,7 +1295,7 @@ impl<'a> Tracer<'a> {
             return t;
         };
         let mut known = vec![(lanes.reach[at.0], true)];
-        if let Some(guard) = lanes.guards[at.0][at.1] {
+        if let Some(guard) = lanes.guards[at.0][at.1].filter(|_| guard_trace()) {
             known.push((guard, true));
         }
         for _ in 0..MAX_JOINS {

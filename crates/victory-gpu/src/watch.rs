@@ -74,8 +74,8 @@ const AHEAD_GAP: usize = (8 << 20) / PAGE;
 /// reimplemented): fewer, wider askings. `VICTORY_WATCH_GAP_MB` sets it.
 const SCAN_GAP: usize = (64 << 20) / PAGE;
 
-/// Whether the wider write-watch scans are on (`VICTORY_WATCH_SCAN=0` turns
-/// them off; on by default): ranges of a submission up to [`SCAN_GAP`]
+/// Whether the wider write-watch scans are on (`VICTORY_WATCH_SCAN=1` turns
+/// them on; off by default): ranges of a submission up to [`SCAN_GAP`]
 /// apart are one kernel asking, and a range [`writes`] asks the kernel
 /// about while an ahead asking stands is answered from the journal for the
 /// rest of that asking's window, not asked again by each overlapping copy.
@@ -84,11 +84,11 @@ const SCAN_GAP: usize = (64 << 20) / PAGE;
 pub(crate) fn scan() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        let on = std::env::var_os("VICTORY_WATCH_SCAN").is_none_or(|v| v != "0");
+        let on = std::env::var_os("VICTORY_WATCH_SCAN").is_some_and(|v| v == "1");
         if on {
             tracing::info!(
                 gap_mb = ahead_gap() * PAGE >> 20,
-                "write-watch scans: wide askings, one scan a window (VICTORY_WATCH_SCAN=0 turns it off)"
+                "write-watch scans: wide askings, one scan a window (VICTORY_WATCH_SCAN=1)"
             );
         }
         on
@@ -103,7 +103,7 @@ const AHEAD_RANGES: usize = 512;
 fn ahead_gap() -> usize {
     static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *GAP.get_or_init(|| {
-        if std::env::var_os("VICTORY_WATCH_SCAN").is_some_and(|v| v == "0") {
+        if !scan() {
             return AHEAD_GAP;
         }
         std::env::var("VICTORY_WATCH_GAP_MB")

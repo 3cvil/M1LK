@@ -879,7 +879,11 @@ fn emit_program(
             .map(|(n, &w)| {
                 let mut s = StaticSampler::from_words(w);
                 if l.cmp_samplers >> n & 1 != 0 {
-                    s.make_comparison();
+                    if sampler::comparison_fix() {
+                        s.make_comparison();
+                    } else {
+                        s.filter |= 0x80;
+                    }
                 }
                 s
             })

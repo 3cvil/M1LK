@@ -10,7 +10,7 @@
 //! * Speculative per-frame staging is capped while the host RAM band is
 //!   Watch or High (`crate::host::sweep_band`). Bake passes are exempt.
 //!
-//! `VICTORY_LOWCOMMIT_BACKOFF=0` turns all of it off.
+//! `VICTORY_LOWCOMMIT_BACKOFF=1` turns all of it on (off by default).
 //! `VICTORY_LOWCOMMIT_RESERVE_MB` sets the look-ahead commit reserve (1024;
 //! bakes use half). `VICTORY_LOWCOMMIT_STAGE_MB` sets the Watch-band staging
 //! cap per frame (96; the High band is capped at 16).
@@ -25,8 +25,8 @@ static RETRY_UPLOAD_AT: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        let on = std::env::var_os("VICTORY_LOWCOMMIT_BACKOFF").is_none_or(|v| v != "0");
-        tracing::info!(on, "low-commit back-off (VICTORY_LOWCOMMIT_BACKOFF=0 turns it off)");
+        let on = std::env::var_os("VICTORY_LOWCOMMIT_BACKOFF").is_some_and(|v| v == "1");
+        tracing::info!(on, "low-commit back-off (off by default; VICTORY_LOWCOMMIT_BACKOFF=1 turns it on)");
         on
     })
 }

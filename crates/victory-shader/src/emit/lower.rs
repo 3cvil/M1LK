@@ -1755,8 +1755,8 @@ fn zero_mask_on() -> bool {
 /// 2-D or 3-D group of several host waves takes its threads from a group counter
 /// ([`Lower::wave_base`]) rather than from the flat id of its wave's first lane rounded down: a
 /// host need not give a host wave such a run there (NVIDIA fills 2-D groups from tiles, so two
-/// waves of a 32 x 2 group round down to the same first thread). On (`VICTORY_THREAD_TICKET=0`:
-/// the rounding, as before). A group of one dimension keeps the rounding: NVIDIA gives a wave a
+/// waves of a 32 x 2 group round down to the same first thread). Off by default
+/// (`VICTORY_THREAD_TICKET=1` turns it on; off is the rounding, as before). A group of one dimension keeps the rounding: NVIDIA gives a wave a
 /// run of 32 there. Part of the shader cache key (`victory-gpu`'s).
 fn ticket_on() -> bool {
     #[cfg(test)]
@@ -1764,7 +1764,30 @@ fn ticket_on() -> bool {
         return on;
     }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_THREAD_TICKET").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_THREAD_TICKET").is_some_and(|v| v == "1"))
+}
+
+/// `VICTORY_NAN_COMPARE_BITS=1`: float compares that a NaN makes true or false, and the
+/// float-to-int conversions, test NaN on the bits (see the `v_cmp` lowering). Off by default:
+/// `fcmp uno`/`ord` and the unordered predicates, as before. Part of the shader cache key.
+fn nan_compare_bits() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_NAN_COMPARE_BITS").is_some_and(|v| v == "1"))
+}
+
+/// `VICTORY_HELPER_FIRSTLANE=1`: in a pixel shader a helper lane reads its own value for
+/// `v_readfirstlane_b32`. Off by default (the first lane's value, as before). Part of the
+/// shader cache key.
+fn helper_first_lane() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_HELPER_FIRSTLANE").is_some_and(|v| v == "1"))
+}
+
+/// `VICTORY_FMAC_ACC_MODS=1`: `v_fmac_f32` in VOP3 applies abs/neg bit 2 to its accumulator.
+/// Off by default (the bit is ignored, as before). Part of the shader cache key.
+fn fmac_acc_mods() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FMAC_ACC_MODS").is_some_and(|v| v == "1"))
 }
 
 /// What [`set_host_max_wave`] was told (0: nothing).
@@ -5359,7 +5382,7 @@ impl<'a> Lower<'a> {
     /// helper lane matches in the first pass and leaves; what a helper lane
     /// computes only feeds derivatives, and its stores are dropped.
     fn helper_reads_own(&mut self, own: V, first: V) -> V {
-        if !self.s.pixel {
+        if !self.s.pixel || !helper_first_lane() {
             return first;
         }
         let c = self.cur;
@@ -8185,10 +8208,10 @@ impl<'a> Lower<'a> {
                 };
                 // In VOP3, bit 2 of abs and neg is the accumulator's (the third source, which
                 // is the destination): RDNA 2 computes fma(a, b, -d) and fma(a, b, |d|).
-                if v.abs >> 2 & 1 != 0 {
+                if fmac_acc_mods() && v.abs >> 2 & 1 != 0 {
                     acc = self.unary(6, acc);
                 }
-                if v.neg >> 2 & 1 != 0 {
+                if fmac_acc_mods() && v.neg >> 2 & 1 != 0 {
                     let z = self.s.m.f32(0x8000_0000);
                     acc = self.s.m.bin(c, Bin::Sub, z, acc);
                 }
@@ -9278,7 +9301,11 @@ impl<'a> Lower<'a> {
             let t = self.binary(36, t, hi);
             let r = self.s.m.cast(c, Cast::FpToSi, t, i32t);
             // on the bits: `fcmp uno` may be folded under fast-math (`is_nan_f32`)
-            let nan = self.is_nan_f32(a);
+            let nan = if nan_compare_bits() {
+                self.is_nan_f32(a)
+            } else {
+                self.s.m.cmp(c, pred::UNO, a, a)
+            };
             let z = self.s.m.i32(0);
             let r = self.s.m.select(c, nan, z, r);
             return self.write_half(inst, r, guard);
@@ -10019,6 +10046,35 @@ impl<'a> Lower<'a> {
                 } else {
                     (self.fsrc(inst, 0)?, self.fsrc(inst, 1)?)
                 };
+                // `VICTORY_NAN_COMPARE_BITS` off (the default): the compares as before.
+                if !nan_compare_bits() {
+                    if op == "lg" {
+                        // Ordered and not equal, false for a NaN, as `olt | ogt`.
+                        let lt = self.s.m.cmp(c, pred::OLT, a, b);
+                        let gt = self.s.m.cmp(c, pred::OGT, a, b);
+                        self.s.m.bin(c, Bin::Or, lt, gt)
+                    } else {
+                        let p = match op {
+                            "f" => pred::FALSE,
+                            "lt" => pred::OLT,
+                            "eq" => pred::OEQ,
+                            "le" => pred::OLE,
+                            "gt" => pred::OGT,
+                            "ge" => pred::OGE,
+                            "o" => pred::ORD,
+                            "u" => pred::UNO,
+                            "nge" => pred::ULT,
+                            "nlg" => pred::UEQ,
+                            "ngt" => pred::ULE,
+                            "nle" => pred::UGT,
+                            "neq" => pred::UNE,
+                            "nlt" => pred::UGE,
+                            "tru" => pred::TRUE,
+                            _ => return Err(inst.name()),
+                        };
+                        self.s.m.cmp(c, p, a, b)
+                    }
+                } else {
                 // Every comparison that a NaN makes true (`u` and the `n`
                 // forms), and `o`, test NaN on the bits (`is_nan_f32`) and
                 // compare ordered otherwise: a driver that takes the
@@ -10078,6 +10134,7 @@ impl<'a> Lower<'a> {
                             self.s.m.bin(c, Bin::Or, r, nan)
                         }
                     }
+                }
                 }
             }
             "u64" | "i64" => {
