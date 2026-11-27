@@ -98,6 +98,8 @@ fn build() -> &'static [u8; 32] {
             "VICTORY_STRICT_JOINS",
             "VICTORY_MESH_OUTPUT_STRICT",
             "VICTORY_CONST_TABLE_TRIM",
+            "VICTORY_SDWA_SEXT_DST",
+            "VICTORY_SDWA_SEXT_16",
         ] {
             hash.update(name.as_bytes());
             hash.update(b"=");

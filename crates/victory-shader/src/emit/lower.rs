@@ -1803,6 +1803,8 @@ pub fn host_max_wave() -> u32 {
 thread_local! {
     pub(super) static TEST_ZERO_MASK: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// A test's choice for [`ticket_on`], for its thread only.
+    /// A test's choice for [`sdwa_sext_dst`], for its thread only.
+    pub(super) static TEST_SDWA_SEXT_DST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// A test's choice for [`const_table_trim`], for its thread only.
     pub(super) static TEST_CONST_TABLE_TRIM: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     pub(super) static TEST_THREAD_TICKET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -2020,6 +2022,50 @@ fn code_table_start(p: &Program, addresses: &[&Address], lowest: u32) -> u32 {
         .unwrap_or(0) as u32;
     let fixed_below = addresses.iter().any(|a| a.dynamic.is_none() && a.offset < code_end);
     if fixed_below { lowest } else { lowest.max(code_end & !3) }
+}
+
+/// What an SDWA destination does to a 16-bit result (see [`sdwa_word_dest`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SdwaDest {
+    /// Low word written, the other word kept.
+    Keep,
+    /// High word written, the other word kept.
+    KeepHigh,
+    /// Low word written, bit 15 copied upward.
+    Sext,
+    /// Low word written (or a whole dword), the rest zero.
+    Pad,
+    /// High word written, the low word zero.
+    PadHigh,
+}
+
+/// The SDWA destination of a 16-bit operation (`dst_sel`: 4 WORD_0, 5 WORD_1, 6 DWORD;
+/// `dst_unused`: 0 pad, 1 sign-extend, 2 preserve, 3 reserved), or `None` if it is none we
+/// translate. Sign extension is WORD_0 with dst_unused 1 only: above the high word or on a whole
+/// dword it adds nothing, so those pad; the reserved dst_unused 3 is refused. (Ported from
+/// MiniVI e7a40a40 / upstream VIctory #3124, GPL-3.0: a 16-bit -1 written with sext came out as
+/// 0x0000FFFF.)
+fn sdwa_word_dest(dst_sel: u8, dst_unused: u8) -> Option<SdwaDest> {
+    Some(match (dst_sel, dst_unused) {
+        (4, 2) => SdwaDest::Keep,
+        (5, 2) => SdwaDest::KeepHigh,
+        (4, 1) => SdwaDest::Sext,
+        (4, 0) | (6, 0..=2) => SdwaDest::Pad,
+        (5, 0 | 1) => SdwaDest::PadHigh,
+        _ => return None,
+    })
+}
+
+/// `VICTORY_SDWA_SEXT_DST=1`: a 16-bit result with an SDWA destination goes by
+/// [`sdwa_word_dest`]. Off by default (the older arms, with `VICTORY_SDWA_SEXT_16` choosing
+/// whether WORD_0 / DWORD with dst_unused 1 sign-extend). Part of the shader cache key.
+fn sdwa_sext_dst() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_SDWA_SEXT_DST.get() {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SDWA_SEXT_DST").is_some_and(|v| v == "1"))
 }
 
 /// `VICTORY_CONST_TABLE_TRIM=1`: the constant table [`Lower::code_dword`] reads starts where the
@@ -9076,15 +9122,26 @@ impl<'a> Lower<'a> {
         let mut keep = true;
         let mut sext = false;
         if let Some(sd) = v.sdwa {
-            static SEXT16: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            let sext_on = *SEXT16.get_or_init(|| std::env::var_os("VICTORY_SDWA_SEXT_16").is_some_and(|v| v == "1"));
-            match (sd.dst_sel, sd.dst_unused) {
-                (4, 2) => {}
-                (5, 2) => high = true,
-                (4 | 6, 1) if sext_on => (keep, sext) = (false, true),
-                (4 | 6, _) => keep = false,
-                (5, _) => (high, keep) = (true, false),
-                _ => return Err("an SDWA destination of a 16-bit operation"),
+            if sdwa_sext_dst() {
+                match sdwa_word_dest(sd.dst_sel, sd.dst_unused) {
+                    Some(SdwaDest::Keep) => {}
+                    Some(SdwaDest::KeepHigh) => high = true,
+                    Some(SdwaDest::Sext) => (keep, sext) = (false, true),
+                    Some(SdwaDest::Pad) => keep = false,
+                    Some(SdwaDest::PadHigh) => (high, keep) = (true, false),
+                    None => return Err("an SDWA destination of a 16-bit operation"),
+                }
+            } else {
+                static SEXT16: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let sext_on = *SEXT16.get_or_init(|| std::env::var_os("VICTORY_SDWA_SEXT_16").is_some_and(|v| v == "1"));
+                match (sd.dst_sel, sd.dst_unused) {
+                    (4, 2) => {}
+                    (5, 2) => high = true,
+                    (4 | 6, 1) if sext_on => (keep, sext) = (false, true),
+                    (4 | 6, _) => keep = false,
+                    (5, _) => (high, keep) = (true, false),
+                    _ => return Err("an SDWA destination of a 16-bit operation"),
+                }
             }
         }
         let c = self.cur;

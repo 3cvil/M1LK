@@ -1,4 +1,4 @@
-use super::{Lowered, Numeric, Parts, buffer_format, code_table_start, half_shift, lower};
+use super::{Lowered, Numeric, Parts, buffer_format, code_table_start, sdwa_word_dest, SdwaDest, half_shift, lower};
 use crate::native::{
     ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
 };
@@ -732,4 +732,22 @@ fn small_floats_widen_as_halves() {
     assert!(f10(0x3FF).is_nan());
     // A 16-bit float is a half already, sign included.
     assert_eq!(half(0xBC00 << half_shift(16)), -1.0);
+}
+
+/// Only WORD_0 with dst_unused 1 sign-extends; a whole dword or the high word pads; the reserved
+/// dst_unused 3 is refused. (Ported from MiniVI e7a40a40, GPL-3.0.)
+#[test]
+fn only_a_low_word_sdwa_destination_sign_extends() {
+    assert_eq!(sdwa_word_dest(4, 1), Some(SdwaDest::Sext));
+    assert_eq!(sdwa_word_dest(6, 1), Some(SdwaDest::Pad));
+    assert_eq!(sdwa_word_dest(5, 1), Some(SdwaDest::PadHigh));
+    assert_eq!(sdwa_word_dest(4, 2), Some(SdwaDest::Keep));
+    assert_eq!(sdwa_word_dest(5, 2), Some(SdwaDest::KeepHigh));
+    assert_eq!(sdwa_word_dest(4, 0), Some(SdwaDest::Pad));
+    assert_eq!(sdwa_word_dest(4, 3), None);
+    assert_eq!(sdwa_word_dest(6, 3), None);
+    assert_eq!(sdwa_word_dest(0, 0), None);
+    let was = super::TEST_SDWA_SEXT_DST.replace(Some(true));
+    assert!(super::sdwa_sext_dst());
+    super::TEST_SDWA_SEXT_DST.set(was);
 }
