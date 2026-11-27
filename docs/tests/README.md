@@ -97,5 +97,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 68 | 2026-11-27 | round 6: lock-free nothing-new check, all table slots skipped by the... | 1.5 | 4.2 | 16.8 | 146 | unchecked | 44* | [chart](test-68.svg) |
 | 69 | 2026-11-27 | M1LK Skimmer ON (held lines on a dedicated thread), A/B 1 | 2.1 | 4.7 | 16.7 | 145 | unchecked | 42* | [chart](test-69.svg) |
 | 70 | 2026-11-27 | M1LK Skimmer OFF, same exe, A/B 1 | 2.5 | 4 | 16.8 | 128 | unchecked | 42* | [chart](test-70.svg) |
+| 71 | 2026-11-27 | M1LK Skimmer ON, A/B 2 | 1.9 | 4.3 | 16.8 | 133 | unchecked | 43* | [chart](test-71.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
