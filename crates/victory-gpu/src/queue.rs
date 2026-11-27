@@ -120,6 +120,80 @@ fn forces() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_WAIT_FORCE").is_none_or(|v| v != "0"))
 }
 
+/// M1LK Skimmer: runs what queues hold on a thread of its own, so the
+/// title's submitting threads and the late helper hand the work over
+/// ([`skim`]) instead of running it inline behind the release gate.
+/// On by default; `VICTORY_SKIMMER=0` runs it inline, as before. Off in
+/// unit tests, which expect the run done when the call returns.
+#[cfg(windows)]
+pub(crate) fn skimmer() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("VICTORY_SKIMMER").ok();
+        let on = !cfg!(test) && skimmer_on(raw.as_deref());
+        tracing::info!(
+            "M1LK Skimmer: {} (VICTORY_SKIMMER={})",
+            if on { "on" } else { "off" },
+            raw.as_deref().unwrap_or("unset")
+        );
+        on
+    })
+}
+
+/// The skimmer switch's value: on unless "0".
+#[cfg(any(windows, test))]
+fn skimmer_on(raw: Option<&str>) -> bool {
+    raw.is_none_or(|v| v.trim() != "0")
+}
+
+/// Whether the skimmer thread has a pass to make.
+#[cfg(windows)]
+static SKIM: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+#[cfg(windows)]
+static SKIM_DUE: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Runs what queues hold as far as their fences have been reached: on the
+/// skimmer thread when [`skimmer`] is on (the caller does not wait for
+/// it), otherwise here, as `release_held(false)`.
+#[cfg(windows)]
+pub(crate) fn skim() {
+    if !skimmer() {
+        release_held(false);
+        return;
+    }
+    // Callers add their queue to the waiting list before this, so nothing
+    // waiting means no pass is needed.
+    if lock(&WAITING).is_empty() {
+        return;
+    }
+    static STARTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let started = *STARTED.get_or_init(|| {
+        let spawned = std::thread::Builder::new()
+            .name("victory-skimmer".into())
+            .spawn(|| loop {
+                {
+                    let mut due = lock(&SKIM);
+                    while !*due {
+                        due = SKIM_DUE.wait(due).unwrap_or_else(|e| e.into_inner());
+                    }
+                    *due = false;
+                }
+                crate::prof::count(crate::prof::C::SkimPasses, 1);
+                release_held(false);
+            });
+        if let Err(e) = &spawned {
+            tracing::error!("M1LK Skimmer: thread not started ({e}); held lines run inline");
+        }
+        spawned.is_ok()
+    });
+    if !started {
+        release_held(false);
+        return;
+    }
+    *lock(&SKIM) = true;
+    SKIM_DUE.notify_one();
+}
+
 /// A submission to a queue whose lists are cut at their waits ([`cuts`]).
 /// The lists before the first one that waits run at once if the queue
 /// holds nothing; the rest goes behind what the queue holds, part by part
@@ -200,7 +274,7 @@ fn submit_cut(this: This, lists: &[This]) {
     }
     // What ran may be what another queue waits for, and what was just
     // given to the queue may be free to run already.
-    release_held(false);
+    skim();
 }
 
 /// A submission to a queue that honours waits, list by list ([`split`]).
@@ -282,7 +356,7 @@ fn submit_split(this: This, lists: &[This]) {
     }
     // What ran may be what another queue waits for, and what was just held
     // may be free to run already.
-    release_held(false);
+    skim();
 }
 
 /// Adds `what()` to what the queue holds, if it holds anything (it waits
@@ -592,7 +666,7 @@ extern "system" fn execute(this: This, count: u32, lists: *const This) {
         crate::list::tables_done(lists);
         // What the lists wrote at the bottom of the pipe may be a fence
         // another queue waits for.
-        release_held(false);
+        skim();
         return;
     }
     let _ = this;
@@ -734,7 +808,7 @@ extern "system" fn wait(this: This, fence: This, value: u64) -> HRESULT {
                 }
             }
             // The fence may have got there meanwhile.
-            release_held(false);
+            skim();
         }
     }
     let _ = (this, value);
@@ -1090,6 +1164,16 @@ static NEWER_FUNCTIONS: Table<36> = Table(queue_table(true));
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    /// The M1LK Skimmer switch: on unless set to "0".
+    #[test]
+    fn skimmer_switch_parses() {
+        assert!(skimmer_on(None));
+        assert!(skimmer_on(Some("1")));
+        assert!(skimmer_on(Some("")));
+        assert!(!skimmer_on(Some("0")));
+        assert!(!skimmer_on(Some(" 0 ")));
+    }
 
     /// Where a queue's signal is: newer layouts have it two slots later.
     /// Another test may switch layouts while this one runs, so the queue's

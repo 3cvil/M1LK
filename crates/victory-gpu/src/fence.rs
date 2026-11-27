@@ -126,7 +126,7 @@ pub(crate) extern "system" fn signal(this: This, value: u64) -> HRESULT {
     set(this, value);
     // A queue may have waited for it: what it held runs now.
     #[cfg(windows)]
-    crate::queue::release_held(false);
+    crate::queue::skim();
     S_OK
 }
 

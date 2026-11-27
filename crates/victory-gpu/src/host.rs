@@ -3479,7 +3479,7 @@ fn late_helper() {
         };
         let Some(target) = target else {
             land();
-            crate::queue::release_held(false);
+            crate::queue::skim();
             continue;
         };
         // The card first, without the submission lock: the submitting
@@ -3500,7 +3500,7 @@ fn late_helper() {
             host.settle(&mut submitted, WHY_CARD_DONE);
         }
         land();
-        crate::queue::release_held(false);
+        crate::queue::skim();
     }
 }
 
