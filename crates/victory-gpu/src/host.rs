@@ -5794,6 +5794,7 @@ impl Host {
         // Only the recording runs concurrently. The GPU receives the
         // original ordered list array, after every worker has closed its list.
         record_preludes(plans);
+        batch.check_textures();
         batch.flush();
         crate::watch::ask_once_end();
         // The snapshots of the ranges shaders may write, if they were left
@@ -7221,7 +7222,15 @@ impl HostList {
                 }
                 Step::Texture { staging, uploads } => {
                     if batch.texture_due(staging) {
-                        staging.refresh(!uploads);
+                        if !*uploads && parallel_refresh() {
+                            // Checked with the others of the batch, several
+                            // at a time, before the next step that writes
+                            // title memory ([`Batch::check_textures`]).
+                            let staging = staging.clone();
+                            batch.due_textures.push(Box::new(move || staging.refresh(true)));
+                        } else {
+                            staging.refresh(!uploads);
+                        }
                     }
                     if *uploads {
                         staging.finish_inline_upload();
@@ -7459,6 +7468,16 @@ fn wide_refresh() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_REFRESH").is_some_and(|v| v == "1"))
 }
 
+/// Whether a submission's plain texture checks (`Step::Texture` without
+/// uploads) are gathered between writes of ours and run on the helper
+/// threads side by side (`VICTORY_PARALLEL_REFRESH=1`; off by default).
+/// A check moves from its step to the next write of ours or flush, never
+/// past one. Checks followed by an inline upload or copy stay in place.
+fn parallel_refresh() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PARALLEL_REFRESH").is_some_and(|v| v == "1"))
+}
+
 /// A submission's refreshes not done yet, merged per buffer copy into the
 /// range that covers them: done before a step that writes title memory or
 /// gives a range to shaders, and before the lists run.
@@ -7477,6 +7496,10 @@ struct Batch {
     index: std::collections::HashMap<usize, usize>,
     /// Staging buffers (by address) refreshed since the last title write.
     textures: std::collections::HashSet<usize>,
+    /// With [`parallel_refresh`]: texture checks due, not run yet
+    /// ([`Batch::check_textures`], before any write of ours and at every
+    /// flush).
+    due_textures: Vec<Box<dyn FnOnce() + Send>>,
 }
 
 impl Batch {
@@ -7529,11 +7552,39 @@ impl Batch {
     /// Before a step that writes title memory: pending refreshes are done
     /// first, and textures are checked again after it.
     fn title_written(&mut self) {
+        self.check_textures();
         self.flush();
         self.textures.clear();
     }
 
+    /// With [`parallel_refresh`]: runs the texture checks due on the helper
+    /// threads (`crate::shadow::wide_run`), all done before it returns. Each
+    /// check takes its texture's own lock. Fewer than two run inline.
+    fn check_textures(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.due_textures.is_empty() {
+            return;
+        }
+        let due = std::mem::take(&mut self.due_textures);
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| tracing::info!("texture checks run side by side (VICTORY_PARALLEL_REFRESH=1)"));
+        if due.len() < 2 {
+            for job in due {
+                job();
+            }
+            return;
+        }
+        let started = std::time::Instant::now();
+        let before = PREPARING[2].load(Relaxed);
+        crate::shadow::wide_run(due);
+        // The time counted is the time it took, not the threads' sum.
+        let summed = PREPARING[2].load(Relaxed).saturating_sub(before);
+        let wall = started.elapsed().as_micros() as u64;
+        PREPARING[2].fetch_sub(summed.saturating_sub(wall), Relaxed);
+    }
+
     fn flush(&mut self) {
+        self.check_textures();
         self.index.clear();
         // One write-watch asking for the copies that lie close together,
         // not one per copy.
@@ -9330,6 +9381,32 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert!(!batch.texture_due(&a));
         assert!(!batch.texture_due(&a.clone()));
         assert!(!batch.texture_due(&b));
+    }
+
+    #[test]
+    fn queued_texture_checks_drain_on_flush_and_title_write() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut batch = Batch::default();
+        let queue = |batch: &mut Batch, n: usize| {
+            for _ in 0..n {
+                let ran = ran.clone();
+                batch.due_textures.push(Box::new(move || {
+                    ran.fetch_add(1, SeqCst);
+                }));
+            }
+        };
+        queue(&mut batch, 1);
+        batch.flush();
+        assert_eq!(ran.load(SeqCst), 1);
+        queue(&mut batch, 5);
+        assert_eq!(ran.load(SeqCst), 1);
+        batch.title_written();
+        assert_eq!(ran.load(SeqCst), 6);
+        assert!(batch.due_textures.is_empty());
+        queue(&mut batch, 3);
+        batch.check_textures();
+        assert_eq!(ran.load(SeqCst), 9);
     }
 
     #[test]
