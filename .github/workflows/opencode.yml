@@ -1,0 +1,48 @@
+# OpenCode helper: comment `/oc <task>` (or `/opencode <task>`) on an issue or PR and an
+# OpenCode agent works on it on a GitHub runner, then opens a pull request.
+# Only the repository owner can trigger it, so strangers can't spend the model quota or get write access.
+# Its pull requests are reviewed like any other before merging (see CONTRIBUTING notes in the README).
+# Only comment /oc on issues or on PRs from branches of this repo: on a PR from a fork, the agent would run that fork's code with the secrets present.
+# Needs the repository secret OPENCODE_API_KEY (an OpenCode Zen key; free models are used).
+name: opencode
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: opencode-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  opencode:
+    if: |
+      github.event.comment.author_association == 'OWNER' &&
+      (contains(github.event.comment.body, '/oc') || contains(github.event.comment.body, '/opencode'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Git identity for commits
+        run: |
+          git config --global user.name "m1lk-opencode[bot]"
+          git config --global user.email "m1lk-opencode@users.noreply.github.com"
+
+      - uses: anomalyco/opencode/github@f4e363c8295fa90a03dddc451882fffe8fbce357 # v1.19.6
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: opencode/deepseek-v4.1-flash-free
+          use_github_token: true
