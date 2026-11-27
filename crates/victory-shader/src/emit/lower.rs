@@ -1803,6 +1803,8 @@ pub fn host_max_wave() -> u32 {
 thread_local! {
     pub(super) static TEST_ZERO_MASK: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// A test's choice for [`ticket_on`], for its thread only.
+    /// A test's choice for [`const_table_trim`], for its thread only.
+    pub(super) static TEST_CONST_TABLE_TRIM: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     pub(super) static TEST_THREAD_TICKET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 
     /// A test's host wave size, for its thread only ([`set_host_max_wave`] is the process's).
@@ -2002,6 +2004,36 @@ fn half_input_partners(io: &StageIo, inputs: &[SigElement]) -> HashMap<u8, u8> {
 
 fn unsupported(offset: usize, what: Why) -> Stop {
     Stop::Fail(ShaderError::Unsupported { offset, what })
+}
+
+/// Where a program's constant table starts in its code: where its instructions end, unless a
+/// load at a fixed offset reads below that (then at `lowest`, the lowest offset any load or
+/// descriptor names). The program's constants follow its instructions, and a load at a computed
+/// offset reads them, not instruction bytes. (Ported from Project-VI e04c0781, GPL-3.0.)
+fn code_table_start(p: &Program, addresses: &[&Address], lowest: u32) -> u32 {
+    let code_end = p
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .map(|i| i.machine.offset + 4 * i.machine.words.len())
+        .max()
+        .unwrap_or(0) as u32;
+    let fixed_below = addresses.iter().any(|a| a.dynamic.is_none() && a.offset < code_end);
+    if fixed_below { lowest } else { lowest.max(code_end & !3) }
+}
+
+/// `VICTORY_CONST_TABLE_TRIM=1`: the constant table [`Lower::code_dword`] reads starts where the
+/// program's instructions end ([`code_table_start`]) rather than at the lowest offset any load
+/// names (offset 0 for a load at a computed offset: the whole program, up to 64 KiB, as a private
+/// constant array, which a host driver may keep in every thread's local memory). Off by default
+/// (the old start). Part of the shader cache key.
+fn const_table_trim() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_CONST_TABLE_TRIM.get() {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CONST_TABLE_TRIM").is_some_and(|v| v == "1"))
 }
 
 impl<'a> Lower<'a> {
@@ -2409,22 +2441,26 @@ impl<'a> Lower<'a> {
         let (g, base, len) = match self.code_table {
             Some(t) => t,
             None => {
-                let first = self
+                let addresses: Vec<&Address> = self
                     .x
                     .res
                     .scalar
                     .iter()
-                    .map(|s| s.1)
+                    .map(|s| &s.1)
                     .chain(self.x.res.descriptors.iter().flat_map(|d| {
                         d.source.leaves().into_iter().filter_map(|l| match l {
-                            Source::Built { address, .. } => Some(*address),
+                            Source::Built { address, .. } => Some(address),
                             _ => None,
                         })
                     }))
                     .filter(|a| a.param == CODE)
-                    .map(|a| a.offset & !3)
-                    .min()
-                    .ok_or("a code table")?;
+                    .collect();
+                let lowest = addresses.iter().map(|a| a.offset & !3).min().ok_or("a code table")?;
+                let first = if const_table_trim() {
+                    code_table_start(self.x.p, &addresses, lowest)
+                } else {
+                    lowest
+                };
                 let code = &self.x.native.code;
                 let words: Vec<u32> = code
                     .get(first as usize..)
