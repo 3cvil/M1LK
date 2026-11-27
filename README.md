@@ -143,6 +143,7 @@ Every test run is logged here automatically, with its settings and a picture che
 | 61 | 2026-11-27 | M1LK Strain OFF half (same exe as strain) | series-s, --no-rt, M1LK_INPLACE_CONSTANTS=1, M1LK_INPLACE=1, M1LK_PORT_CONSTANTS=-, M1LK_COPY_PROF=1, M1LK_SUBMIT_PROF=1 | standing/all median 4.4 fps (65 samples), peak 6898 draws/frame; WALKING median 4.7 fps, low 3.7 (51 samples). Picture check pending. |
 | 62 | 2026-11-27 | ladder step 2: Watch Skip (repeat of ws-on, curd exe) | series-s, --no-rt, M1LK_INPLACE_CONSTANTS=1, M1LK_INPLACE=1, M1LK_PORT_CONSTANTS=-, M1LK_COPY_PROF=1, M1LK_SUBMIT_PROF=1, M1LK_WATCH_SKIP=1 | standing/all median 4 fps (65 samples), peak 7128 draws/frame; WALKING median 4.1 fps, low 3.5 (50 samples). Picture check pending. |
 | 63 | 2026-11-27 | ladder step 1: none (Watch Skip repeat OFF half, curd exe) | series-s, --no-rt, M1LK_INPLACE_CONSTANTS=1, M1LK_INPLACE=1, M1LK_PORT_CONSTANTS=-, M1LK_COPY_PROF=1, M1LK_SUBMIT_PROF=1 | standing/all median 4 fps (65 samples), peak 6638 draws/frame; WALKING median 4.3 fps, low 3.5 (50 samples). Picture check pending. |
+| 64 | 2026-11-27 | ladder step 3: Watch Skip + COPY_PLAIN | series-s, --no-rt, M1LK_INPLACE_CONSTANTS=1, M1LK_INPLACE=1, M1LK_PORT_CONSTANTS=-, M1LK_COPY_PROF=1, M1LK_SUBMIT_PROF=1, M1LK_WATCH_SKIP=1, M1LK_COPY_PLAIN=1 | standing/all median 3.7 fps (66 samples), peak 6375 draws/frame; WALKING median 3.9 fps, low 3.2 (51 samples). Picture check pending. |
 
 This table is updated after every test run.
 
