@@ -28,6 +28,8 @@
 //! | `LOWCOMMIT_BACKOFF` | start-only | commit behaviour of uploads and staging is set up at start |
 //! | `INPLACE_CONSTANTS` | start-only | regions and buffer forms are placed once; a title buffer cannot change form |
 //! | `GPU_DETILE` | start-only | textures kept detiled on the card or the PC stay so; the shader is made at start |
+//! | `HYDRA_LIST_RECYCLE` | runtime | landed lists are reset by the submitter or by the helper thread; both paths take the same list of landed lists under one lock |
+//! | `STAGING_CAP_MB` | start-only | caps the live texture staging buffers; the cap is read once and buffers already made are not revoked |
 //!
 //! The schedule (`M1LK_TOGGLE_PLAN`, names joined by `,` or `+` (the test queue splits its env list on commas); see [`parse_plan`] and [`schedule`])
 //! names runtime-safe switches only. [`on_frame`] is called once a frame by
@@ -109,6 +111,29 @@ fn not_off_word(v: Option<&str>) -> bool {
     v.is_some_and(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "" | "0" | "off" | "false" | "no"))
 }
 
+/// The staging cap, in MiB, a variable's text asks for: nothing, `0` or an
+/// off word is no cap; `1`, `on`, `true`, `yes` is 64; a number is itself.
+pub fn staging_cap_mb(v: Option<&str>) -> u64 {
+    const DEFAULT_MB: u64 = 64;
+    let Some(text) = v else { return 0 };
+    let text = text.trim().to_ascii_lowercase();
+    match text.as_str() {
+        "" | "0" | "off" | "false" | "no" => 0,
+        "1" | "on" | "true" | "yes" => DEFAULT_MB,
+        other => other.parse::<u64>().unwrap_or(0),
+    }
+}
+
+fn staging_cap_on(v: Option<&str>) -> bool {
+    staging_cap_mb(v) > 0
+}
+
+/// The staging cap in bytes (0: none), read once at start.
+pub fn staging_cap_bytes() -> u64 {
+    static BYTES: OnceLock<u64> = OnceLock::new();
+    *BYTES.get_or_init(|| staging_cap_mb(env_text("STAGING_CAP_MB").as_deref()).saturating_mul(1 << 20))
+}
+
 pub static COPY_PLAIN: Switch = Switch::new("COPY_PLAIN", true, is_one);
 pub static SHORT_REMAP_LOCK: Switch = Switch::new("SHORT_REMAP_LOCK", true, is_one);
 pub static WIDE_REFRESH: Switch = Switch::new("WIDE_REFRESH", true, is_one);
@@ -129,8 +154,17 @@ pub static LOWCOMMIT_BACKOFF: Switch = Switch::new("LOWCOMMIT_BACKOFF", false, i
 pub static INPLACE_CONSTANTS: Switch = Switch::new("INPLACE_CONSTANTS", false, is_one);
 pub static GPU_DETILE: Switch = Switch::new("GPU_DETILE", false, is_one);
 
+/// Landed lists are reset off the submitting thread (the helper thread that
+/// settles flights does it when poked), not inline after every submission.
+/// Ported from ToLIManl/VIctory-Hydra d831214bd (`VICTORY_ASYNC_RECYCLE`).
+pub static HYDRA_LIST_RECYCLE: Switch = Switch::new("HYDRA_LIST_RECYCLE", true, is_one);
+/// Hard cap on live texture staging upload buffers (RAM), in MiB: any number
+/// above 0, or a plain on word for 64. Idea from elaboratecl/VIctory-AMD-4K
+/// 6ca34156f (`pool::STAGING` hard cap), kept vendor-neutral.
+pub static STAGING_CAP_MB: Switch = Switch::new("STAGING_CAP_MB", false, staging_cap_on);
+
 /// Every switch, runtime-safe and start-only.
-pub static ALL: [&Switch; 17] = [
+pub static ALL: [&Switch; 19] = [
     &QUEUE_MARKS,
     &NOTHING_NEW_LOCKFREE,
     &TABLED_ALL,
@@ -148,6 +182,8 @@ pub static ALL: [&Switch; 17] = [
     &LOWCOMMIT_BACKOFF,
     &INPLACE_CONSTANTS,
     &GPU_DETILE,
+    &HYDRA_LIST_RECYCLE,
+    &STAGING_CAP_MB,
 ];
 
 /// The switch of a name (with or without `M1LK_`/`VICTORY_`, any case).
@@ -401,7 +437,36 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), ALL.len());
         let start_only: Vec<&str> = ALL.iter().filter(|s| !s.runtime_safe).map(|s| s.name).collect();
-        assert_eq!(start_only, vec!["JOURNAL_RWLOCK", "WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE"]);
+        assert_eq!(start_only, vec!["JOURNAL_RWLOCK", "WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE", "STAGING_CAP_MB"]);
+    }
+
+    #[test]
+    fn round_seven_switches_are_registered_off_by_default_and_flagged() {
+        let s = find("HYDRA_LIST_RECYCLE").expect("registered");
+        assert!(s.runtime_safe);
+        assert!(!(s.parse)(None));
+        assert!((s.parse)(Some("1")));
+        let s = find("STAGING_CAP_MB").expect("registered");
+        assert!(!s.runtime_safe);
+        assert!(!(s.parse)(None));
+        assert!(!(s.parse)(Some("0")));
+        assert!((s.parse)(Some("1")));
+        let (keep, refused) = parse_plan("HYDRA_LIST_RECYCLE+STAGING_CAP_MB");
+        assert_eq!(keep.len(), 1);
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].1.starts_with("start-only"));
+    }
+
+    #[test]
+    fn staging_cap_text_gives_mib() {
+        assert_eq!(staging_cap_mb(None), 0);
+        assert_eq!(staging_cap_mb(Some("")), 0);
+        assert_eq!(staging_cap_mb(Some("0")), 0);
+        assert_eq!(staging_cap_mb(Some("off")), 0);
+        assert_eq!(staging_cap_mb(Some("1")), 64);
+        assert_eq!(staging_cap_mb(Some(" On ")), 64);
+        assert_eq!(staging_cap_mb(Some("96")), 96);
+        assert_eq!(staging_cap_mb(Some("junk")), 0);
     }
 
     #[test]

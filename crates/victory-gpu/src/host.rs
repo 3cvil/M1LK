@@ -3438,6 +3438,21 @@ pub(crate) fn settle_for_fence() {
     settle_now(WHY_FENCE);
 }
 
+/// Most landed lists the helper thread may be left to recycle before the
+/// submitting thread does it itself (backpressure).
+const RECYCLE_BACKLOG: usize = 64;
+
+/// Whether the submitting thread resets the landed lists itself: always
+/// unless `HYDRA_LIST_RECYCLE` is on, the relay is active, and there is
+/// something to hand over that is not a runaway backlog.
+fn recycle_inline(relay: bool, landed: usize) -> bool {
+    recycle_inline_with(victory_core::switches::HYDRA_LIST_RECYCLE.is_on(), relay, landed)
+}
+
+fn recycle_inline_with(switch: bool, relay: bool, landed: usize) -> bool {
+    !switch || !relay || landed == 0 || landed > RECYCLE_BACKLOG
+}
+
 /// Resets the host lists of settled flights and keeps them for reuse, as
 /// a queue does for the lists it ran (`crate::list::recycle`).
 fn land() {
@@ -3841,7 +3856,19 @@ fn late_line(frames: f64) {
 
 #[cfg(test)]
 mod late_tests {
-    use super::{continues, join_ranges, touches};
+    use super::{RECYCLE_BACKLOG, continues, join_ranges, recycle_inline_with, touches};
+
+    /// The submitter recycles landed lists itself unless the switch is on, the
+    /// relay is active, and there is a modest number to hand over.
+    #[test]
+    fn list_recycle_is_inline_unless_handed_over() {
+        assert!(recycle_inline_with(false, true, 3));
+        assert!(recycle_inline_with(true, false, 3));
+        assert!(recycle_inline_with(true, true, 0));
+        assert!(!recycle_inline_with(true, true, 1));
+        assert!(!recycle_inline_with(true, true, RECYCLE_BACKLOG));
+        assert!(recycle_inline_with(true, true, RECYCLE_BACKLOG + 1));
+    }
 
     /// Copies join only when both ends continue and the whole does not
     /// overlap itself.
@@ -5431,7 +5458,14 @@ impl Host {
             LINE_MOVED.notify_one();
         }
         drop(submitted);
-        land();
+        if recycle_inline(relay(), line().landed.len()) {
+            land();
+        } else {
+            // The helper thread that settles flights resets the landed lists
+            // when poked (ported from ToLIManl/VIctory-Hydra d831214bd).
+            line().poke = true;
+            LINE_MOVED.notify_one();
+        }
     }
 
     /// Sends `list`, a closed list of ours (the present's copy), as a

@@ -17,6 +17,44 @@ const CLASSES: usize = (MAX_SHIFT - MIN_SHIFT + 1) as usize;
 struct Chunk {
     buffer: ID3D12Resource,
     address: usize,
+    /// Bytes counted in [`LIVE`] for this buffer (0 if none).
+    counted: u64,
+}
+
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        if self.counted > 0 {
+            LIVE.fetch_sub(self.counted, Relaxed);
+        }
+    }
+}
+
+/// Bytes of staging upload buffers alive, for `STAGING_CAP_MB`.
+static LIVE: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a new staging buffer of `bytes` may be made with `live` bytes
+/// alive under `cap` (0: no cap). With nothing alive one buffer is always
+/// allowed, so a texture larger than the cap can still be uploaded.
+fn admit(live: u64, bytes: u64, cap: u64) -> bool {
+    cap == 0 || live == 0 || live.saturating_add(bytes) <= cap
+}
+
+/// Takes `bytes` of the staging cap: whether the buffer may be made (and, if
+/// so, the bytes the new buffer is to count). Idea from
+/// elaboratecl/VIctory-AMD-4K 6ca34156f (`STAGING_CAP_MB`).
+fn reserve(bytes: u64) -> Option<u64> {
+    let cap = victory_core::switches::staging_cap_bytes();
+    if cap == 0 {
+        return Some(0);
+    }
+    let live = LIVE.load(Relaxed);
+    if !admit(live, bytes, cap) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| tracing::warn!(cap_mb = cap >> 20, "staging cap (STAGING_CAP_MB) reached: a texture staging buffer is refused"));
+        return None;
+    }
+    LIVE.fetch_add(bytes, Relaxed);
+    Some(bytes)
 }
 
 struct Slots {
@@ -100,11 +138,16 @@ impl Upload {
                 return Some(upload);
             }
         }
-        let (buffer, data) = host.upload_buffer(bytes)?;
+        let counted = reserve(bytes)?;
+        let Some((buffer, data)) = host.upload_buffer(bytes) else {
+            LIVE.fetch_sub(counted, Relaxed);
+            return None;
+        };
         Some(Self {
             chunk: Arc::new(Chunk {
                 buffer,
                 address: data as usize,
+                counted,
             }),
             slot: None,
             offset: 0,
@@ -119,12 +162,16 @@ impl Upload {
     pub(super) fn new_gpu(host: &Host, raw: u64, linear: u64) -> Option<Self> {
         let raw_size = raw.max(64 << 10).next_power_of_two();
         let linear_size = linear.max(64 << 10).next_power_of_two();
-        let (raw_buf, data, raw_pooled) = match take_spare(&SPARE_RAW, raw_size) {
-            Some(SpareBuf(b, p)) => (b, p as *mut u8, raw_size),
+        let (raw_buf, data, raw_pooled, raw_counted) = match take_spare(&SPARE_RAW, raw_size) {
+            Some(SpareBuf(b, p)) => (b, p as *mut u8, raw_size, 0),
             None => {
-                let (b, p) = host.upload_buffer(raw_size)?;
+                let counted = reserve(raw_size)?;
+                let Some((b, p)) = host.upload_buffer(raw_size) else {
+                    LIVE.fetch_sub(counted, Relaxed);
+                    return None;
+                };
                 crate::host::name(&b, || "texture detile source".into());
-                (b, p, raw_size)
+                (b, p, raw_size, counted)
             }
         };
         let (linear_buf, linear_pooled) = match take_spare(&SPARE_LINEAR, linear_size) {
@@ -135,6 +182,7 @@ impl Upload {
             chunk: Arc::new(Chunk {
                 buffer: raw_buf,
                 address: data as usize,
+                counted: raw_counted,
             }),
             slot: None,
             offset: 0,
@@ -186,12 +234,17 @@ impl Upload {
             return Some(Self::from_slot(page, class, index, size));
         }
 
-        let (buffer, data) = host.upload_buffer(CHUNK_BYTES)?;
+        let counted = reserve(CHUNK_BYTES)?;
+        let Some((buffer, data)) = host.upload_buffer(CHUNK_BYTES) else {
+            LIVE.fetch_sub(counted, Relaxed);
+            return None;
+        };
         crate::host::name(&buffer, || "texture staging pool".into());
         let page = Slots {
             chunk: Arc::new(Chunk {
                 buffer,
                 address: data as usize,
+                counted,
             }),
             free: (1..(CHUNK_BYTES / size) as u32).rev().collect(),
         };
@@ -254,4 +307,23 @@ impl Drop for Upload {
 #[cfg(feature = "diagnostics")]
 pub(super) fn totals() -> (u64, u64) {
     (CREATED.load(Relaxed), REUSE.load(Relaxed))
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::admit;
+
+    #[test]
+    fn no_cap_admits_everything() {
+        assert!(admit(u64::MAX / 2, 1 << 30, 0));
+    }
+
+    #[test]
+    fn cap_refuses_past_the_total_but_a_first_buffer_always_fits() {
+        let cap = 64 << 20;
+        assert!(admit(0, 256 << 20, cap), "a lone big buffer is allowed");
+        assert!(admit(60 << 20, 4 << 20, cap), "exactly at the cap");
+        assert!(!admit(60 << 20, (4 << 20) + 1, cap));
+        assert!(!admit(u64::MAX, 1, cap), "saturates, does not wrap");
+    }
 }
