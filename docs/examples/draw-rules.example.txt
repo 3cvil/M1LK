@@ -1,0 +1,11 @@
+# Example rule file for M1LK_DRAW_RULES. The hashes below are FAKE: a real
+# one is the 16-digit shader hash your own log prints for a translated shader.
+# Nothing in this repository names a real shader.
+#
+#   <16 hex digits> skip              never run
+#   <16 hex digits> every <n>         run in one frame of n
+#   <16 hex digits> every <n> at <k>  run in frames whose number % n == k
+
+0123456789abcdef skip
+fedcba9876543210 every 4
+00000000000000aa every 3 at 1

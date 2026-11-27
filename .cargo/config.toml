@@ -1,2 +1,6 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# AVX2/BMI2/FMA code generation (any x86-64 CPU from 2013 on). A RUSTFLAGS environment variable replaces this.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

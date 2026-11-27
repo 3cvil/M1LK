@@ -4,11 +4,13 @@
 //! * [`policy`]: the runtime half of rule #1, refusing to write
 //!   game-derived data into the source tree.
 //! * [`logging`]: one tracing setup for all binaries.
+//! * [`switches`]: named runtime switches and their timed schedule.
 
 pub mod config;
 pub mod env_alias;
 pub mod logging;
 pub mod policy;
+pub mod switches;
 
 pub use config::Config;
 pub use policy::{PolicyError, ensure_outside_repo};

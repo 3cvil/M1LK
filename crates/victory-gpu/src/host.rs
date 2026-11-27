@@ -7474,8 +7474,7 @@ mod fill_tests {
 /// The write-watch journal and the guards are behind their own locks, as
 /// they are for the title's threads.
 fn wide_refresh() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_REFRESH").is_some_and(|v| v == "1"))
+    victory_core::switches::WIDE_REFRESH.is_on()
 }
 
 /// Whether a submission's plain texture checks (`Step::Texture` without
@@ -7484,8 +7483,7 @@ fn wide_refresh() -> bool {
 /// A check moves from its step to the next write of ours or flush, never
 /// past one. Checks followed by an inline upload or copy stay in place.
 fn parallel_refresh() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_PARALLEL_REFRESH").is_some_and(|v| v == "1"))
+    victory_core::switches::PARALLEL_REFRESH.is_on()
 }
 
 /// A submission's refreshes not done yet, merged per buffer copy into the
@@ -8216,12 +8214,14 @@ impl Meter {
             COPY_BACK[i].swap(0, Ordering::Relaxed) as f64 / [1e3, 1e6][i] / frames
         });
         let dropped = crate::draw::take_dropped() as f64 / frames;
+        let low_skipped = crate::lowdetail::take_skipped() as f64 / frames;
         let indirect = crate::list::take_indirect() as f64 / frames;
         let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
         let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
         tracing::info!(
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame"
         );
+        crate::shadow::lookup_cache_line(frames);
         late_line(frames);
         crate::copyprof::log(frames);
         card_clock_line(frames, ms);
@@ -8420,7 +8420,7 @@ impl Meter {
                  {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
                  GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
                  dropped {dropped:.0} without a host pipeline ({making} being made) and \
-                 {indirect:.0} indirect; heap buffers {picked:.1} passes {picked_ms:.1} ms;                  texture slots written so far: {placed} placed, {objects} of objects; \
+                 {indirect:.0} indirect; low_skipped={low_skipped:.0}/frame; heap buffers {picked:.1} passes {picked_ms:.1} ms;                  texture slots written so far: {placed} placed, {objects} of objects; \
                  textures picked by index: {picked_textures} uploaded so far ({picked_mb} MB), \
                  {picked_waiting} waiting, {picked_away} passed over unmapped; depth textures with                  unordered access: {du0} made, bound as depth {du1}x, cleared as depth {du2}x,                  unordered views refused {du3}x; buffer views left null as the host would refuse them: {refused}; \
                  cpu {cpu_pct:.1}% gpu {gpu_pct:.0}% busy ram {ram_mb:.0} MB",

@@ -784,8 +784,19 @@ fn system_timestamp() -> u64 {
 /// Frames presented so far.
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// The number of frames presented so far.
+#[cfg(windows)]
+pub(crate) fn frame_number() -> u64 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
 #[cfg(feature = "diagnostics")]
 pub(crate) fn presented() -> u64 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
+/// Frames presented so far (also without diagnostics).
+pub(crate) fn frame_count() -> u64 {
     FRAMES.load(Ordering::Relaxed)
 }
 
@@ -818,6 +829,15 @@ extern "system" fn present(
     #[cfg(windows)]
     release_held(forces());
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    // The toggle schedule (M1LK_TOGGLE_PLAN) flips switches here, between two frames.
+    #[cfg(windows)]
+    for name in victory_core::switches::on_frame(frame, crate::draw::drawn()) {
+        match name {
+            "LOOKUP_CACHE" => crate::shadow::lookup_cache_flipped(),
+            "RANGE_MEMO" => crate::watch::range_memo_flipped(),
+            _ => {}
+        }
+    }
     #[cfg(all(windows, feature = "diagnostics"))]
     if frame.is_power_of_two()
         && std::env::var_os("VICTORY_TRACE_PRESENT_PLANES").is_some()

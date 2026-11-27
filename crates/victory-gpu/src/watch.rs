@@ -650,6 +650,70 @@ struct Guards {
     /// (those views' blocks are in it too): a write to one opens them all.
     /// A write range can be huge (`fread`), so only these are looked up.
     aliased: BTreeSet<usize>,
+    /// Kernel answers of [`uncommitted_end`] for absent blocks, kept for a
+    /// frame (`M1LK_RANGE_MEMO=1`).
+    uncommitted: Uncommitted,
+}
+
+/// [`uncommitted_end`]'s answers, run start -> end (blocks), for the frame
+/// [`crate::queue::frame_count`] numbered when they were asked. Off unless
+/// `M1LK_RANGE_MEMO=1`: then every ask goes to the kernel, as before.
+///
+/// Ported from LoverCatys/ruff-lab d263e5b8 (derived from edsuuu/VI-BR-PORT
+/// 136efde0ab, based on victory-fork#824), GPL-3.0. A guard over a heap
+/// asked `VirtualQuery` again and again on the submitting thread for the
+/// same hole. Commits that need no runtime notice are seen from the next
+/// frame on.
+struct Uncommitted {
+    frame: u64,
+    runs: BTreeMap<usize, usize>,
+}
+
+impl Uncommitted {
+    /// The runs over `[at, end)` (bytes) are asked about again.
+    fn forget(&mut self, at: usize, end: usize) {
+        if self.runs.is_empty() {
+            return;
+        }
+        let (first, last) = (at / BLOCK, end.div_ceil(BLOCK));
+        self.runs.retain(|&from, &mut to| to <= first || from >= last);
+    }
+
+    fn on() -> bool {
+        #[cfg(test)]
+        if let Some(on) = TEST_RANGE_MEMO.with(std::cell::Cell::get) {
+            return on;
+        }
+        victory_core::switches::RANGE_MEMO.is_on()
+    }
+
+    fn end(&mut self, block: usize) -> usize {
+        if !Self::on() {
+            return uncommitted_end(block);
+        }
+        // Once a frame the kernel is asked again whatever we were told.
+        let frame = crate::queue::frame_count();
+        if frame != self.frame {
+            self.frame = frame;
+            self.runs.clear();
+        }
+        if let Some((_, &end)) = self.runs.range(..=block).next_back()
+            && end > block
+        {
+            return end;
+        }
+        let end = uncommitted_end(block);
+        if end > block {
+            self.runs.insert(block, end);
+        }
+        end
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: forces the range memo on or off for the current test thread.
+    static TEST_RANGE_MEMO: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 static GUARDS: Mutex<Guards> = Mutex::new(Guards {
@@ -657,10 +721,21 @@ static GUARDS: Mutex<Guards> = Mutex::new(Guards {
     clean: CleanBlocks(BTreeMap::new()),
     absent: BTreeSet::new(),
     aliased: BTreeSet::new(),
+    uncommitted: Uncommitted {
+        frame: 0,
+        runs: BTreeMap::new(),
+    },
 });
 
 fn guards() -> std::sync::MutexGuard<'static, Guards> {
     GUARDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The range memo switch was flipped (between two frames): what it kept is
+/// dropped, so a later flip back on starts from the kernel's answers.
+pub(crate) fn range_memo_flipped() {
+    let mut g = guards();
+    g.uncommitted.runs.clear();
 }
 
 /// For view memory: the pages of `[start, end)`'s blocks written since
@@ -702,7 +777,7 @@ pub(crate) fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
                 // Ordinary commits need no runtime mapping notification. Reuse
                 // this query for the following blocks in the same region.
                 if block >= uncommitted_until {
-                    uncommitted_until = uncommitted_end(block);
+                    uncommitted_until = g.uncommitted.end(block);
                 }
                 if block < uncommitted_until {
                     if let Some(from) = run.take() {
@@ -950,7 +1025,10 @@ pub fn writing(at: usize, len: usize) {
     // handler): committed first (`VICTORY_LAZY_COMMIT`).
     crate::lazy::ensure(at, len);
     // The length is the title's (`fread`'s size times count, saturated).
-    open(&mut guards(), at, at.saturating_add(len));
+    let mut g = guards();
+    g.uncommitted.forget(at, at.saturating_add(len));
+    open(&mut g, at, at.saturating_add(len));
+    drop(g);
     // A placed texture there changes with no descriptor written.
     crate::descriptor::host::remapped(at, len);
 }
@@ -979,6 +1057,7 @@ pub(crate) fn views_mapped(section: usize, offset: u64, len: usize) {
     }
     let mut g = guards();
     for &(at, n) in &ranges {
+        g.uncommitted.forget(at, at.saturating_add(n));
         if open_here(&mut g, at, at.saturating_add(n)) {
             #[cfg(feature = "diagnostics")]
             ALIASES[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1125,6 +1204,8 @@ pub fn title_memory_remapped(at: usize, len: usize) {
     // And nothing stays in place over it.
     crate::inplace::title_memory_freeing(at, len);
     let mut g = guards();
+    // A mapping commits what was a placeholder: the runs over it are asked again.
+    g.uncommitted.forget(at, at.saturating_add(len));
     let range = at / BLOCK..at.saturating_add(len).div_ceil(BLOCK);
     let absent: Vec<usize> = g.absent.range(range.clone()).copied().collect();
     for block in absent {
@@ -1209,6 +1290,27 @@ pub(crate) mod tests {
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     };
     const MEM_WRITE_WATCH: u32 = 0x20_0000;
+
+    #[test]
+    fn uncommitted_runs_are_kept_until_their_memory_is_remapped() {
+        TEST_RANGE_MEMO.with(|c| c.set(Some(true)));
+        // SAFETY: a fresh reservation of four blocks, released at the end.
+        let base = unsafe { VirtualAlloc(std::ptr::null(), 4 * BLOCK, MEM_RESERVE, PAGE_READWRITE) } as usize;
+        assert_ne!(base, 0);
+        let first = base / BLOCK;
+        let mut memo = Uncommitted { frame: crate::queue::frame_count(), runs: BTreeMap::new() };
+        assert_eq!(memo.end(first + 1), first + 4);
+        // SAFETY: inside the reservation.
+        assert!(!unsafe { VirtualAlloc((base + BLOCK) as *const _, BLOCK, MEM_COMMIT, PAGE_READWRITE) }.is_null());
+        // Kept: no mapping was told of.
+        assert_eq!(memo.end(first + 1), first + 4);
+        // As `title_memory_remapped` drops the runs over the block.
+        memo.forget(base + BLOCK, base + 2 * BLOCK);
+        assert_eq!(memo.end(first + 1), first + 1, "a committed block is not uncommitted");
+        // SAFETY: the reservation made above.
+        unsafe { VirtualFree(base as *mut _, 0, MEM_RELEASE) };
+        TEST_RANGE_MEMO.with(|c| c.set(None));
+    }
 
     #[test]
     fn kernel_pages_fold_into_guest_pages_without_losing_writes() {

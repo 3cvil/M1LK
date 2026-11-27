@@ -73,6 +73,9 @@ opt-level = 2
 
 [profile.release]
 debug = "line-tables-only"
+# Cross-crate inlining on the per-frame path; the build is slower (about 2.5x), the code is faster.
+lto = "fat"
+codegen-units = 1
 
 # The development build: release code generation plus the `diagnostics`
 # feature (`cargo build --profile diag -p victory --features diagnostics`),

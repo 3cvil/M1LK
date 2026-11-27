@@ -518,11 +518,20 @@ struct Pipeline {
     walks: OnceLock<bool>,
     #[cfg(all(windows, feature = "diagnostics"))]
     builder_recorded: std::sync::atomic::AtomicBool,
+    /// The draw rule that applies to it ([`crate::lowdetail`]).
+    #[cfg(windows)]
+    low_rule: Option<u16>,
 }
 const _: () = assert!(offset_of!(Pipeline, packet) == 0x10);
 
 /// Stage names, in description order.
 const GRAPHICS_STAGES: [&str; 5] = ["vertex", "pixel", "domain", "hull", "geometry"];
+
+/// Whether a draw rule holds this pipeline's draw or dispatch back now.
+#[cfg(windows)]
+pub(crate) fn low_holds(this: This) -> bool {
+    !this.is_null() && pipeline(this).low_rule.is_some_and(crate::lowdetail::holds)
+}
 
 fn pipeline<'a>(this: This) -> &'a Pipeline {
     // SAFETY: the title passes one of our pipelines.
@@ -721,6 +730,11 @@ fn hand_out(
         builder,
         #[cfg(windows)]
         walks: OnceLock::new(),
+        #[cfg(windows)]
+        low_rule: {
+            crate::lowdetail::init();
+            crate::lowdetail::rule_for(shaders.iter().map(|s| s.hash.as_str()))
+        },
         #[cfg(all(windows, feature = "diagnostics"))]
         builder_recorded: std::sync::atomic::AtomicBool::new(false),
         shaders,
