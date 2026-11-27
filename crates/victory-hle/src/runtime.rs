@@ -326,6 +326,18 @@ pub fn title() -> Title {
         .unwrap_or_default()
 }
 
+/// Starts the in-process sampling profiler (`M1LK_SAMPLE_PROF=1`; off: nothing starts).
+#[cfg(windows)]
+pub fn start_sample_profiler() {
+    victory_gpu::sampleprof::start();
+}
+
+/// Writes the sampling profiler's report now, at the end of a run (if it is on).
+#[cfg(windows)]
+pub fn finish_sample_profiler() {
+    victory_gpu::sampleprof::finish();
+}
+
 /// Gives the process the console's millisecond timers. Titles pace
 /// themselves with short waits (the title's audio mixer sleeps
 /// about 4 ms per 5.3 ms block) and cannot tune the timer on the console;

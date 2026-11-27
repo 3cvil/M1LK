@@ -68,6 +68,7 @@ mod primitive;
 pub mod query;
 pub mod queue;
 pub mod resource;
+pub mod sampleprof;
 pub mod root;
 #[cfg(windows)]
 mod sampler;
