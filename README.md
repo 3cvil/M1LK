@@ -11,6 +11,19 @@ It loads an Xbox Series title's x86-64 executable from an installation you suppl
 GDK / XGameRuntime platform services underneath it, and translates its `d3d12_xs` GPU work to desktop
 Direct3D 12. M1LK targets NVIDIA only; AMD users should use other projects.
 
+## Aim
+
+**Make the title playable for as many people as possible on low-end NVIDIA PCs**: cards with
+8 GB of VRAM or less and PCs with limited system RAM (16 GB, and less where possible).
+
+- **Frame rate:** 30 real fps while playing first, then 60. Frame generation is welcome on top, and its
+  numbers are always shown next to real fps.
+- **Memory:** fit in 16 GB of system RAM with room to spare (13 GB peak or less), and in 8 GB of VRAM.
+- **Settings that matter:** in-game and launcher options that really change performance (resolution
+  scale, upscaling, shadows, draw distance, ray tracing and more), each with its measured cost, so
+  anyone can trade picture for speed on their own machine.
+- **Looks good and stays stable:** a complete, correctly lit picture and long sessions without crashes.
+
 > [!IMPORTANT]
 > **You need your own copy of the game.** M1LK contains and distributes no game files, code, assets,
 > keys or download links. It only runs a title you own and installed yourself. See the
@@ -51,6 +64,8 @@ taken from the [test log](#test-log) below.
 - [ ] 40-minute soak without a crash.
 - [ ] Ray tracing measured in game on NVIDIA.
 - [ ] 30 real fps (frame generation numbers are always reported next to real fps).
+- [ ] 60 real fps on the reference machine.
+- [ ] Performance settings with measured costs, documented for low-end cards.
 
 ## Test log
 
@@ -488,8 +503,9 @@ In priority order (the [Progress](#progress) table has the latest numbers):
 1. **Series S upscaler.** Series S now runs with a picture and menus (4.5 fps, 17.1 GB peak). The title's
    own console upscaler shaders don't translate yet, so a simple spatial upscaler stands in for them.
 2. **RAM use.** Peak commit is about 21 GB on Series X and 17 GB on Series S. The goal is 13 GB or less.
-3. **Frame rate on 8 GB NVIDIA cards.** The median is 3.5 fps on Series X with ray tracing off. The goal
-   is 30 fps that looks good (frame generation is fine, but report real fps next to it).
+3. **Frame rate on low-end NVIDIA cards.** About 4.5 fps walking today. The goal is 30 real fps that
+   looks good, then 60 (frame generation is fine, but report real fps next to it), plus settings that
+   let people with weaker cards or less RAM trade picture for speed.
 4. **Load time.** It takes about 10 minutes to reach player control.
 5. **Ray tracing on NVIDIA** (wave32/wave64 shader translation, BVH builder).
 
