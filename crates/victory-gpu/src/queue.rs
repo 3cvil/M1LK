@@ -307,30 +307,39 @@ fn hold(this: This, what: impl FnOnce() -> Held) -> bool {
 /// one.
 #[cfg(windows)]
 pub(crate) fn release_held(all: bool) {
-    let _prof = crate::prof::Scope::new(crate::prof::S::Lines);
+    use crate::prof::S;
+    // (Neptune) `lines`, cut into its parts (`crate::prof`, VICTORY_SUBMIT_PROF=1).
+    let mut split = crate::prof::Split::new(S::Lines, S::LinesOther, Some(S::LinesVictory));
+    crate::prof::count(crate::prof::C::LinesCalls, 1);
     // One caller at a time, so a queue's submissions keep their order.
     static RELEASING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     if lock(&WAITING).is_empty() {
         return;
     }
+    split.skip();
     let _one = lock(&RELEASING);
+    split.mark(S::LinesGate);
     loop {
         let queues = lock(&WAITING).clone();
         let mut moved = false;
         for q in queues {
             // SAFETY: a live queue: one released is taken off the list.
             let held = unsafe { &(*(q as *const Queue)).held };
+            split.skip();
             let mut held = lock(held);
+            split.mark(S::LinesHeldLock);
             loop {
-                match held.first() {
-                    None => break,
-                    Some(&Held::Wait(fence, value))
-                        if !all && crate::fence::completed(fence as This) < value =>
-                    {
-                        break;
+                let stop = match held.first() {
+                    None => true,
+                    Some(&Held::Wait(fence, value)) => {
+                        !all && crate::fence::completed(fence as This) < value
                     }
-                    Some(Held::Value(wait)) if !all && !value_met(wait) => break,
-                    Some(_) => {}
+                    Some(Held::Value(wait)) => !all && !value_met(wait),
+                    Some(_) => false,
+                };
+                split.mark(S::LinesCheck);
+                if stop {
+                    break;
                 }
                 match held.remove(0) {
                     Held::Wait(..) => {}
@@ -370,12 +379,15 @@ pub(crate) fn release_held(all: bool) {
                                 crate::copystat::add(crate::copystat::C::PartsTogether, 1);
                             }
                         }
+                        crate::prof::count(crate::prof::C::LinesRuns, 1);
+                        split.skip();
                         if crate::host::late()
                             && let Some(host) = crate::host::host()
                         {
                             // Not waited for: the host keeps the lists
                             // until they are settled.
                             host.execute_late(lists, order);
+                            split.mark(S::LinesRun);
                         } else {
                             let ran = {
                                 let runs: Vec<&crate::host::HostList> =
@@ -388,10 +400,12 @@ pub(crate) fn release_held(all: bool) {
                                     None => false,
                                 }
                             };
+                            split.mark(S::LinesRun);
                             // They have run: their host lists are used again.
                             if ran {
                                 crate::list::recycle(lists, &order);
                             }
+                            split.mark(S::LinesRecycle);
                         }
                         if all {
                             #[cfg(feature = "diagnostics")]
@@ -407,9 +421,11 @@ pub(crate) fn release_held(all: bool) {
                     // Behind what was sent to the card and not waited
                     // for, if anything was.
                     Held::Signal(fence, value) => {
+                        split.skip();
                         if !crate::host::late_signal(fence, value) {
                             crate::fence::set(fence as This, value);
                         }
+                        split.mark(S::LinesSignal);
                     }
                 }
                 moved = true;

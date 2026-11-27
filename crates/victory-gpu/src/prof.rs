@@ -78,7 +78,10 @@ pub(crate) enum S {
     Present,
     /// `victory-submit` with nothing to do (waiting to be woken).
     Idle,
-    /// `victory-submit` in `release_held`, all of it (busy time of the lines).
+    /// `release_held`, all of it, summed over every thread that calls it (the title's
+    /// `ExecuteCommandLists`/`Signal`/`Wait`/`Present`, `victory-late-wait`, ...): it nests the
+    /// held submissions it runs (`settle`, `sweep`, ... are inside it) and lock waits, so it
+    /// can exceed the frame. Parts: the `lines_*` slots.
     Lines,
     /// `victory-ahead`: planning the pass over the heap's buffer views.
     AheadPlan,
@@ -88,10 +91,37 @@ pub(crate) enum S {
     AheadSpans,
     /// `victory-ahead`: the pass over textures picked by index.
     AheadTextures,
+    /// Of `lines`: the part spent on threads named `victory-*` (the rest is the title's own
+    /// threads: `release_held` runs on whoever calls it, not on one thread of ours).
+    LinesVictory,
+    /// Of `lines`: waiting for `release_held`'s one-caller gate (`RELEASING`).
+    LinesGate,
+    /// Of `lines`: waiting for a queue's `held` lock (the title's submissions take it too).
+    LinesHeldLock,
+    /// Of `lines`: the fence and memory-value checks of what queues hold.
+    LinesCheck,
+    /// Of `lines`: `Host::execute` / `execute_late` of a held submission, all of it (the
+    /// submission stages `settle`, `sweep`, `snapshots`, ... are inside this).
+    LinesRun,
+    /// Of `lines`: held signals (`late_signal` / `fence::set`).
+    LinesSignal,
+    /// Of `lines`: host lists given back (`list::recycle`).
+    LinesRecycle,
+    /// Of `lines`: what none of the `lines_*` slots above took (bookkeeping, logging).
+    LinesOther,
+    /// `Host::submit`: waiting for the submission lock (`Host::submitted`), any caller.
+    SubmitLock,
+    /// `Host::submit_part`: from after `make_waiting` to the lists being ready to send
+    /// (translation of the title's lists into ours, snapshots, the card's own list).
+    SubmitBuild,
+    /// `Host::execute_late` after the submission: the settle or relay wait for the card.
+    LateCardWait,
+    /// `Host::execute_late`: landing finished flights (copies back to title memory).
+    LateLand,
 }
 
 /// Stages ([`S`]).
-const STAGES: usize = S::AheadTextures as usize + 1;
+const STAGES: usize = S::LateLand as usize + 1;
 
 /// Counts summed with the stages.
 #[derive(Clone, Copy)]
@@ -105,9 +135,13 @@ pub(crate) enum C {
     AheadDue,
     /// Records `sync_heaps` mirrored.
     SyncMirrored,
+    /// `release_held` calls (any thread).
+    LinesCalls,
+    /// Held submissions `release_held` ran.
+    LinesRuns,
 }
 
-const COUNTS: usize = C::SyncMirrored as usize + 1;
+const COUNTS: usize = C::LinesRuns as usize + 1;
 
 static US: [AtomicU64; STAGES] = [const { AtomicU64::new(0) }; STAGES];
 static N: [AtomicU64; COUNTS] = [const { AtomicU64::new(0) }; COUNTS];
@@ -195,9 +229,28 @@ const NAMES: [&str; STAGES] = [
     "ahead_slots",
     "ahead_spans",
     "ahead_textures",
+    "lines_victory",
+    "lines_gate",
+    "lines_held_lock",
+    "lines_check",
+    "lines_run",
+    "lines_signal",
+    "lines_recycle",
+    "lines_other",
+    "submit_lock",
+    "submit_build",
+    "late_card_wait",
+    "late_land",
 ];
 
-const COUNT_NAMES: [&str; COUNTS] = ["submissions", "steps", "ahead_due", "sync_mirrored"];
+const COUNT_NAMES: [&str; COUNTS] = [
+    "submissions",
+    "steps",
+    "ahead_due",
+    "sync_mirrored",
+    "lines_calls",
+    "lines_runs",
+];
 
 /// The line, over `frames` frames: every stage in ms a frame, every count a frame.
 pub(crate) fn line(frames: f64) {
@@ -231,6 +284,70 @@ impl Drop for Scope {
             lap(self.0, since);
         }
     }
+}
+
+/// A span cut into named parts: [`Split::mark`] gives the time since the last mark (or
+/// [`Split::skip`]) to a stage; at the drop the whole goes to `whole`, what no mark took to
+/// `rest`, and with `victory` the whole also to it on a thread named `victory-*`.
+pub(crate) struct Split {
+    whole: S,
+    rest: S,
+    victory: Option<S>,
+    start: Option<Instant>,
+    last: Option<Instant>,
+    parts: u64,
+}
+
+impl Split {
+    #[inline]
+    pub(crate) fn new(whole: S, rest: S, victory: Option<S>) -> Split {
+        let start = on().then(Instant::now);
+        Split { whole, rest, victory, start, last: start, parts: 0 }
+    }
+
+    /// The time since the last mark goes to `stage`.
+    #[inline]
+    pub(crate) fn mark(&mut self, stage: S) {
+        if let Some(last) = self.last {
+            let now = Instant::now();
+            let us = now.saturating_duration_since(last).as_micros() as u64;
+            US[stage as usize].fetch_add(us, Relaxed);
+            self.parts += us;
+            self.last = Some(now);
+        }
+    }
+
+    /// The time since the last mark is left to `rest`.
+    #[inline]
+    pub(crate) fn skip(&mut self) {
+        if self.last.is_some() {
+            self.last = Some(Instant::now());
+        }
+    }
+}
+
+impl Drop for Split {
+    fn drop(&mut self) {
+        let Some(start) = self.start else {
+            return;
+        };
+        let whole = start.elapsed().as_micros() as u64;
+        US[self.whole as usize].fetch_add(whole, Relaxed);
+        US[self.rest as usize].fetch_add(whole.saturating_sub(self.parts), Relaxed);
+        if let Some(v) = self.victory
+            && on_victory_thread()
+        {
+            US[v as usize].fetch_add(whole, Relaxed);
+        }
+    }
+}
+
+/// Whether this thread is one of ours (named `victory-*`).
+fn on_victory_thread() -> bool {
+    thread_local! {
+        static OURS: bool = std::thread::current().name().is_some_and(|n| n.starts_with("victory-"));
+    }
+    OURS.with(|o| *o)
 }
 
 #[cfg(test)]

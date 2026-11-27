@@ -5420,6 +5420,7 @@ impl Host {
         };
         LATE_STATS[0].fetch_add(1, Ordering::Relaxed);
         RELAY_MOVED.notify_one();
+        let card_wait = std::time::Instant::now();
         if told && !late_writes() {
             self.settle(&mut submitted, WHY_WRITES);
         } else if most && relay_exact() {
@@ -5431,7 +5432,9 @@ impl Host {
             LINE_MOVED.notify_one();
         }
         drop(submitted);
+        let landing = crate::prof::lap(crate::prof::S::LateCardWait, card_wait);
         land();
+        crate::prof::lap(crate::prof::S::LateLand, landing);
     }
 
     /// Sends `list`, a closed list of ours (the present's copy), as a
@@ -5637,7 +5640,11 @@ impl Host {
         let mut called = std::time::Instant::now();
         // One submission at a time from preparation to copy-back: snapshots
         // and the ranges shaders write are per host copy, not per submission.
+        let locking = crate::prof::on().then(std::time::Instant::now);
         let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(since) = locking {
+            crate::prof::lap(crate::prof::S::SubmitLock, since);
+        }
         let mut already_run = 0;
         while let Some(cut) = texture_dependency_cut(runs) {
             (submitted, _) = self.submit_part(&runs[..cut], false, submitted, #[cfg(feature = "diagnostics")] called);
@@ -5705,7 +5712,7 @@ impl Host {
         // The slots that waited for a texture's host copy, before the
         // lists that may read them run.
         crate::descriptor::make_waiting();
-        crate::prof::lap(crate::prof::S::MakeWaiting, lap);
+        let build_began = crate::prof::lap(crate::prof::S::MakeWaiting, lap);
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
         // The ranges shaders write are counted for it (with the relay).
         crate::shadow::preparing(this_submission);
@@ -5827,7 +5834,9 @@ impl Host {
             lists.push(Some(check));
         }
         let prepared = std::time::Instant::now();
+        crate::prof::lap(crate::prof::S::SubmitBuild, build_began);
         if late {
+            let execute_began = std::time::Instant::now();
             *submitted += 1;
             // SAFETY: closed lists; the fence is ours.
             let signalled = unsafe {
@@ -5839,6 +5848,7 @@ impl Host {
                 self.queue.Signal(&self.fence, *submitted)
             };
             self.card_sent();
+            let tail_began = crate::prof::lap(crate::prof::S::Execute, execute_began);
             if let Err(e) = signalled {
                 fail(format_args!("a submission sent ahead could not be followed by a signal ({e})"));
             }
@@ -5860,6 +5870,7 @@ impl Host {
             }
             crate::texback::add_destination_aliases(&mut texture_writes);
             let writes = runs.iter().flat_map(|l| l.deferred().writes.clone()).collect();
+            crate::prof::lap(crate::prof::S::Tail, tail_began);
             SUBMISSION_US[0].fetch_add((prepared - started).saturating_sub(settled).as_micros() as u64, Ordering::Relaxed);
             submitting(0, 0);
             #[cfg(feature = "diagnostics")]
