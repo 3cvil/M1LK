@@ -1980,9 +1980,30 @@ pub(crate) fn let_go_idle() {
             let entries: Vec<(u64, u64, usize)> = eligible.iter().map(|&(used, _, id, len)| (used, len, id)).collect();
             window_victims(&entries, keep)
         };
-        victims.into_iter().filter_map(|i| map.remove(&eligible[i].1)).collect()
+        if lookup_cache() && !victims.is_empty() {
+            // A thread's remembered answer ([`lookup`]) can hold a window
+            // the check above found held by nobody: bump first, look again
+            // as the windows go; the asking thread looks at the count after
+            // it took hold.
+            tables_changed();
+            std::sync::atomic::fence(Ordering::SeqCst);
+            victims
+                .into_iter()
+                .filter_map(|i| {
+                    let key = eligible[i].1;
+                    if map.get(&key).is_some_and(|s| Arc::strong_count(s) == 1) {
+                        map.remove(&key)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            victims.into_iter().filter_map(|i| map.remove(&eligible[i].1)).collect()
+        }
     };
     if !gone.is_empty() {
+        tables_changed();
         let (went, bytes) = (gone.len(), gone.iter().map(|s| s.len).sum::<u64>());
         crate::host::trail(|| {
             format!("sweep: {went} host copies of windows of title memory let go ({} KiB), held by no list and no slot", bytes >> 10)
@@ -3237,6 +3258,7 @@ fn buffers() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Entry>> {
 
 /// A title buffer exists at `start` (`len` bytes).
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
+    tables_changed();
     let old = buffers().insert(
         (start, resource),
         Entry {
@@ -3245,12 +3267,14 @@ pub(crate) fn register(resource: usize, start: u64, len: u64) {
         },
     );
     crate::memory::ownership_changed(start, old.map_or(len, |e| len.max(e.end - start)));
+    tables_changed();
     BUFFER_GENERATION.fetch_add(1, Ordering::Release);
 }
 
 /// The title released it; lists that still hold its copy keep it alive.
 pub(crate) fn unregister(resource: usize, start: u64) {
     if let Some(old) = buffers().remove(&(start, resource)) {
+        tables_changed();
         crate::memory::ownership_changed(start, old.end - start);
         BUFFER_GENERATION.fetch_add(1, Ordering::Release);
     }
@@ -3295,6 +3319,7 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
     }
     let n = gone.len() as u64;
     if n != 0 {
+        tables_changed();
         crate::memory::ownership_changed(at, len);
         BUFFER_GENERATION.fetch_add(1, Ordering::Release);
     }
@@ -3346,7 +3371,123 @@ pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
     lookup(address, len, true)
 }
 
+/// Counts the changes of the tables [`lookup`] reads that can change what an
+/// ask finds: a buffer registered or released, a copy taken out of a table, a
+/// window made or let go. A thread's remembered answers ([`FOUND`]) are from
+/// one count.
+static TABLES_CHANGED: AtomicU64 = AtomicU64::new(0);
+
+fn tables_changed() {
+    TABLES_CHANGED.fetch_add(1, Ordering::Release);
+}
+
+/// Since the last frame line: asks answered from a thread's own memory of
+/// them, and asks that went to the tables (only counted with
+/// `M1LK_LOOKUP_CACHE=1`).
+pub(crate) static LOOKUPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Whether a thread remembers what its asks for a buffer's host copy found
+/// (`M1LK_LOOKUP_CACHE=1`; off by default).
+///
+/// Ported from fxceless/victory-fork 32be36d5 (PR #1237; also
+/// bolado-dev/mandy-port f5831b33), GPL-3.0. Every bind of a draw asks for
+/// the host copy of each buffer it reads, under the tables' lock, and the
+/// recording threads ask for the same ranges again and again. A thread keeps
+/// what each ask (address, length, kind) found, weakly, for as long as the
+/// tables have not changed ([`TABLES_CHANGED`]).
+fn lookup_cache() -> bool {
+    if let Some(on) = test_override() {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_LOOKUP_CACHE").is_ok_and(|v| v == "1"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOOKUP_CACHE_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn test_override() -> Option<bool> {
+    LOOKUP_CACHE_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn test_override() -> Option<bool> {
+    None
+}
+
+/// Says, once a frame line, how many asks for a buffer's host copy were
+/// answered from a thread's memory of them and how many went to the tables.
+/// Nothing with the switch off.
+pub(crate) fn lookup_cache_line(frames: f64) {
+    if !lookup_cache() {
+        return;
+    }
+    let [kept, tables] = [0, 1].map(|i| LOOKUPS[i].swap(0, Ordering::Relaxed) as f64 / frames);
+    tracing::info!(
+        "asks for a buffer's host copy per frame: {kept:.0} answered from the asking thread's memory of them, {tables:.0} from the tables (M1LK_LOOKUP_CACHE)"
+    );
+}
+
+/// The most asks a thread remembers before it starts again.
+const FOUND_MOST: usize = 8192;
+
+type Found = std::collections::HashMap<(u64, u64, bool), std::sync::Weak<Shadow>>;
+
+thread_local! {
+    /// What this thread's asks found, and the count of table changes they
+    /// are from.
+    static FOUND: std::cell::RefCell<(u64, Found)> = std::cell::RefCell::new((u64::MAX, Found::new()));
+}
+
 fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
+    if !lookup_cache() {
+        return lookup_tables(address, len, any);
+    }
+    let changes = TABLES_CHANGED.load(Ordering::Acquire);
+    let found = FOUND.with(|f| {
+        let f = &mut *f.borrow_mut();
+        if f.0 != changes {
+            f.1.clear();
+            f.0 = changes;
+        }
+        f.1.get(&(address, len, any)).and_then(std::sync::Weak::upgrade)
+    });
+    // Taken hold of: if the tables changed meanwhile (a sweep may have found
+    // the copy held by nobody just before), ask them.
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if let Some(shadow) = found.filter(|_| TABLES_CHANGED.load(Ordering::Acquire) == changes) {
+        LOOKUPS[0].fetch_add(1, Ordering::Relaxed);
+        if shadow.window {
+            // As `loose` notes an ask of a window it hands out.
+            shadow.used.store(crate::host::moment(), Ordering::Relaxed);
+            shadow.asked[0].fetch_min(address, Ordering::Relaxed);
+            shadow.asked[1].fetch_max(address.saturating_add(len.max(1)), Ordering::Relaxed);
+            if len <= 1 {
+                shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        return Some(shadow);
+    }
+    LOOKUPS[1].fetch_add(1, Ordering::Relaxed);
+    let shadow = lookup_tables(address, len, any)?;
+    FOUND.with(|f| {
+        let f = &mut *f.borrow_mut();
+        // (from the count read before the tables were: a change since
+        // clears it at the next ask)
+        if f.0 == changes {
+            if f.1.len() >= FOUND_MOST {
+                f.1.clear();
+            }
+            f.1.insert((address, len, any), Arc::downgrade(&shadow));
+        }
+    });
+    Some(shadow)
+}
+
+fn lookup_tables(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
     let end = address.checked_add(len.max(1))?;
     let mut map = buffers();
     let key = map
@@ -3620,6 +3761,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         let shadow = Arc::new(Shadow::placed(placed, start, len, true));
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        tables_changed();
         return Some(shadow);
     }
     // In the card's memory the CPU maps, if asked for and there is room:
@@ -3634,6 +3776,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         let shadow = Arc::new(shadow);
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        tables_changed();
         return Some(shadow);
     }
     let (buffer, data) = host()?.shared_buffer(len)?;
@@ -3670,6 +3813,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     }
     note(&shadow);
     map.insert((start, len), shadow.clone());
+    tables_changed();
     Some(shadow)
 }
 
@@ -3808,6 +3952,20 @@ mod window_tests {
         // The whole cell's window is the longest tail of all.
         let with_whole = [(cell, WINDOW), tail(0x8_0000)];
         assert_eq!(longest_tail(with_whole.into_iter(), ask, ask + 1), Some((cell, WINDOW)));
+    }
+
+    /// A thread's remembered asks are off without the switch, and a change
+    /// of the tables moves the count they are from.
+    #[test]
+    fn the_lookup_cache_is_off_and_table_changes_are_counted() {
+        assert!(!super::lookup_cache());
+        let before = super::TABLES_CHANGED.load(std::sync::atomic::Ordering::Acquire);
+        super::tables_changed();
+        assert!(super::TABLES_CHANGED.load(std::sync::atomic::Ordering::Acquire) > before);
+        super::LOOKUP_CACHE_TEST.with(|c| c.set(Some(true)));
+        assert!(super::lookup_cache());
+        super::LOOKUP_CACHE_TEST.with(|c| c.set(None));
+        assert!(!super::lookup_cache());
     }
 
     /// The setting takes powers of two from 64 KiB to 4 MiB; anything else

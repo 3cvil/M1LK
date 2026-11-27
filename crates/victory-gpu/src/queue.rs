@@ -789,6 +789,11 @@ pub(crate) fn presented() -> u64 {
     FRAMES.load(Ordering::Relaxed)
 }
 
+/// Frames presented so far (also without diagnostics).
+pub(crate) fn frame_count() -> u64 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
 /// Shows the first plane's first resource in our window.
 ///
 /// shortcut: one plane, no scaling or placement, the source expected in
