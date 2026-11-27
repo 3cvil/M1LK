@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main, "test/**"]
+    # README rows and charts change no code: no lints or tests for them
+    paths-ignore: ["**.md", "docs/**"]
 
 permissions:
   contents: read
