@@ -199,6 +199,9 @@ fn open_region(device: &ID3D12Device, at: u64, end: u64) -> Result<Region, (usiz
     if first > at || first + bytes < end || offset % K64 != 0 {
         return Err((3, format!("the stretch {first:#x}+{bytes:#x} does not hold it")));
     }
+    // The heap needs the pages committed; lazy ones are, through the
+    // title's addresses (`VICTORY_LAZY_COMMIT`).
+    crate::lazy::ensure(first as usize, bytes as usize);
     // SAFETY: the section of a view the title has; the runtime keeps its
     // handle open while a view of it is there, and the range is inside it.
     let view = unsafe { mem::MapViewOfFile(section as _, mem::FILE_MAP_WRITE, (offset >> 32) as u32, offset as u32, bytes as usize) }.Value as usize;

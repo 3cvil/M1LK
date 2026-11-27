@@ -946,6 +946,9 @@ fn open_here(g: &mut Guards, start: usize, end: usize) -> bool {
 /// The runtime calls it (as `kernel_will_write`) before the title's kernel
 /// reads into its own memory.
 pub fn writing(at: usize, len: usize) {
+    // The kernel's write fails on a lazy page (it does not fault into the
+    // handler): committed first (`VICTORY_LAZY_COMMIT`).
+    crate::lazy::ensure(at, len);
     // The length is the title's (`fread`'s size times count, saturated).
     open(&mut guards(), at, at.saturating_add(len));
     // A placed texture there changes with no descriptor written.
@@ -1140,9 +1143,10 @@ pub fn title_memory_remapped(at: usize, len: usize) {
     }
 }
 
-/// Registers the handler that takes writes to guarded blocks, once, ahead
-/// of the crash reporter's.
-fn install() {
+/// Registers the handler that takes writes to guarded blocks (and first
+/// touches of lazy pages, `crate::lazy`), once, ahead of the crash
+/// reporter's.
+pub(crate) fn install() {
     use windows_sys::Win32::Foundation::{EXCEPTION_ACCESS_VIOLATION, NTSTATUS};
     use windows_sys::Win32::System::Diagnostics::Debug::{
         AddVectoredExceptionHandler, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH,
@@ -1152,10 +1156,15 @@ fn install() {
         // SAFETY: the system passes the exception being dispatched.
         let r = unsafe { &*(*info).ExceptionRecord };
         const WRITE: usize = 1;
-        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS
-            || r.NumberParameters < 2
-            || r.ExceptionInformation[0] != WRITE
-        {
+        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS || r.NumberParameters < 2 {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        // A first touch of a lazily mapped page (`VICTORY_LAZY_COMMIT`),
+        // read or write: committed, and the access goes on.
+        if crate::lazy::on_fault(r.ExceptionInformation[0], r.ExceptionInformation[1]) {
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if r.ExceptionInformation[0] != WRITE {
             return EXCEPTION_CONTINUE_SEARCH;
         }
         let at = r.ExceptionInformation[1];

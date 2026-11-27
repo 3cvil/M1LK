@@ -85,6 +85,8 @@ mod texture;
 #[cfg(windows)]
 mod wc_back;
 #[cfg(windows)]
+mod lazy;
+#[cfg(windows)]
 mod tiles;
 #[cfg(windows)]
 mod watch;
@@ -102,6 +104,11 @@ pub fn frames_begun() -> u64 {
 }
 #[cfg(windows)]
 pub use wc_back::title_memory_reserved;
+#[cfg(windows)]
+pub use lazy::{
+    ensure as lazy_ensure, is_lazy as lazy_is_lazy, mark_view as lazy_mark_view, on as lazy_commit_on,
+    section_committed as lazy_section_committed, section_gone as lazy_section_gone, unmark as lazy_unmark,
+};
 #[cfg(windows)]
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_view};
 #[cfg(windows)]

@@ -429,6 +429,9 @@ fn constants_place(device: &ID3D12Device, start: u64, len: u64, min: u64, fresh:
 /// over one, which it was not seen to do.
 fn constants_open(device: &ID3D12Device, at: u64, end: u64) -> Result<Region, (usize, String)> {
     let bytes = (end - at) as usize;
+    // The heap needs the pages committed; lazy ones are, through the
+    // title's addresses (`VICTORY_LAZY_COMMIT`).
+    crate::lazy::ensure(at as usize, bytes);
     let Cover::Run(section, offset) = cover(at as usize, bytes) else {
         return Err((3, format!("not one run of a section: {:?}", cover(at as usize, bytes))));
     };

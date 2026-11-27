@@ -222,6 +222,11 @@ pub extern "system" fn XMemVirtualQuery(
             return 0;
         }
         let info = &mut *out;
+        // A lazy page (`VICTORY_LAZY_COMMIT`) is mapped memory to the title.
+        if info.host.State == MEM_RESERVE && victory_gpu::lazy_is_lazy(address as usize) {
+            info.host.State = MEM_COMMIT;
+            info.host.Protect = PAGE_READWRITE;
+        }
         info.flags = if info.host.State == MEM_COMMIT {
             GRAPHICS
         } else {
@@ -381,6 +386,9 @@ unsafe impl Sync for Section {}
 
 impl Drop for Section {
     fn drop(&mut self) {
+        // Its handle value may name another section later.
+        #[cfg(windows)]
+        victory_gpu::lazy_section_gone(self.0 as usize);
         // SAFETY: our handle; views keep the section alive on their own.
         unsafe { CloseHandle(self.0) };
     }
@@ -587,7 +595,13 @@ impl View {
             return None;
         }
         let view = View { at, len };
-        commit(at.Value as usize, len).then_some(view)
+        let committed = commit(at.Value as usize, len);
+        if committed {
+            // The slices are committed for every view of them: none of
+            // the title's addresses of them is lazy any more.
+            victory_gpu::lazy_section_committed(slice.section.0 as usize, slice.index, n);
+        }
+        committed.then_some(view)
     }
 
     fn bytes(&mut self) -> &mut [u8] {
@@ -989,7 +1003,15 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
         );
         return false;
     }
-    if !commit(base, len) {
+    // `VICTORY_LAZY_COMMIT=1`: left reserved, each 64 KiB page committed
+    // on first use (Wine commits sections whole anyway).
+    let lazy = victory_gpu::lazy_commit_on() && !on_wine();
+    let committed = if lazy {
+        victory_gpu::lazy_mark_view(base, len, slice.section.0 as usize, slice.index)
+    } else {
+        commit(base, len)
+    };
+    if !committed {
         // SAFETY: the view just mapped, back to a placeholder.
         unsafe { UnmapViewOfFile2(GetCurrentProcess(), view, MEM_PRESERVE_PLACEHOLDER) };
         return false;
@@ -1135,6 +1157,7 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
             }
         }
         victory_gpu::title_memory_remapped(at, size);
+        victory_gpu::lazy_unmark(at, size);
         // SAFETY: a view we mapped; it becomes a placeholder again.
         unsafe {
             UnmapViewOfFile2(

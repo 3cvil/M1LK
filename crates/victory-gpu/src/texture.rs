@@ -1657,7 +1657,11 @@ fn query_working_set(info: &mut [PSAPI_WORKING_SET_EX_INFORMATION], first: usize
 fn page_readable(info: &PSAPI_WORKING_SET_EX_INFORMATION, asked: bool) -> bool {
     // SAFETY: bit 0 of a successful query's returned flags is Valid.
     let valid = asked && unsafe { info.VirtualAttributes.Flags } & 1 != 0;
-    valid || crate::host::read_into(info.VirtualAddress.cast(), &mut [0u8])
+    // A lazy page (`VICTORY_LAZY_COMMIT`) is there: zeros until first use,
+    // committed by the first access (the kernel's read does not commit it).
+    valid
+        || crate::host::read_into(info.VirtualAddress.cast(), &mut [0u8])
+        || crate::lazy::is_lazy(info.VirtualAddress as usize)
 }
 
 fn committed_by_query(at: *const u8, len: usize) -> bool {
@@ -1669,10 +1673,14 @@ fn committed_by_query(at: *const u8, len: usize) -> bool {
         let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: a valid out pointer of the right size.
         let n = unsafe { VirtualQuery(p as *const _, &mut info, size_of_val(&info)) };
-        if n == 0 || info.State != MEM_COMMIT {
+        let next = info.BaseAddress as usize + info.RegionSize;
+        if n == 0
+            || info.State != MEM_COMMIT
+                && crate::lazy::lazy_bytes(p, next.min(end)) != next.min(end).saturating_sub(p)
+        {
             return false;
         }
-        p = info.BaseAddress as usize + info.RegionSize;
+        p = next;
     }
     true
 }
@@ -1768,6 +1776,13 @@ fn mapped_regions(start: usize, end: usize, first_only: bool) -> u64 {
         if info.State == MEM_COMMIT && info.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0 {
             there += (next - p) as u64;
             if first_only {
+                break;
+            }
+        } else if info.State != MEM_COMMIT {
+            // Lazy pages (`VICTORY_LAZY_COMMIT`) are mapped, not yet committed.
+            let lazy = crate::lazy::lazy_bytes(p, next) as u64;
+            there += lazy;
+            if first_only && lazy > 0 {
                 break;
             }
         }

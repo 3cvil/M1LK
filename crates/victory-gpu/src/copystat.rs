@@ -708,6 +708,7 @@ fn log_memory_map() {
 /// holds by kind (alive now), then the host buffers made since the start.
 fn log_memory() {
     use std::sync::atomic::Ordering::Relaxed;
+    crate::lazy::log_stats();
     let mb = |v: u64| v as f64 / (1 << 20) as f64;
     let (working, private) = process_memory();
     let (free, left) = system_memory();
