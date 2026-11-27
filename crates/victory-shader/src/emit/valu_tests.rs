@@ -663,7 +663,7 @@ fn v_cmp_lg_is_false_for_nan() {
 /// tested on the bits of the operands, not by `fcmp uno`, which a driver may
 /// fold: every f32 compare gives the ISA's answer for NaN operands too.
 // NaN compare semantics are the point: negated float compares stay as written.
-#[allow(clippy::neg_cmp_op_on_partial_ord, clippy::nonminimal_bool)]
+#[allow(clippy::neg_cmp_op_on_partial_ord, clippy::nonminimal_bool, clippy::double_comparisons)]
 #[test]
 fn v_cmp_f32_nan_forms_match_the_isa() {
     // The lowering is opt-in (VICTORY_NAN_COMPARE_BITS=1); the default keeps the old behaviour.
