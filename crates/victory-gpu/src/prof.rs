@@ -145,9 +145,13 @@ pub(crate) enum C {
     SkimPasses,
     /// (M1LK Pour) Chunks of a submission sent to the card ahead of its last.
     PourChunks,
+    /// (M1LK Rennet) `VirtualProtect` calls of the coalesced re-guard passes.
+    RennetProtectCalls,
+    /// (M1LK Rennet) 64 KiB blocks those passes made read-only again.
+    RennetBlocks,
 }
 
-const COUNTS: usize = C::PourChunks as usize + 1;
+const COUNTS: usize = C::RennetBlocks as usize + 1;
 
 static US: [AtomicU64; STAGES] = [const { AtomicU64::new(0) }; STAGES];
 static N: [AtomicU64; COUNTS] = [const { AtomicU64::new(0) }; COUNTS];
@@ -323,6 +327,8 @@ const COUNT_NAMES: [&str; COUNTS] = [
     "lines_runs",
     "skim_passes",
     "pour_chunks",
+    "rennet_protect_calls",
+    "rennet_blocks",
 ];
 
 /// The line, over `frames` frames: every stage in ms a frame, every count a frame.

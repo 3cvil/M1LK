@@ -151,8 +151,9 @@ pub(crate) fn mode() -> u8 {
     })
 }
 
-/// Per source range (start, length): copies, bytes, microseconds, memory type.
-type Ranges = HashMap<(usize, usize), (u64, u64, u64, u32)>;
+/// Per source range (start, length): copies, bytes asked, bytes copied,
+/// microseconds, memory type.
+type Ranges = HashMap<(usize, usize), (u64, u64, u64, u64, u32)>;
 static RANGES: Mutex<Option<Ranges>> = Mutex::new(None);
 
 /// Per range copied whole because its memory is not watched (start,
@@ -261,16 +262,18 @@ pub(crate) fn compared(src: usize, len: usize, written: usize) {
     e.1 += written as u64;
 }
 
-/// A copy of `len` bytes from `src` (memory type `kind`) took `us`.
-pub(crate) fn range(src: usize, len: usize, us: u64, kind: u32) {
+/// A refresh of `len` bytes from `src` (memory type `kind`) copied `copied`
+/// of them and took `us`.
+pub(crate) fn range(src: usize, len: usize, copied: usize, us: u64, kind: u32) {
     let mut map = RANGES.lock().unwrap_or_else(|e| e.into_inner());
     let e = map
         .get_or_insert_with(HashMap::new)
         .entry((src, len))
-        .or_insert((0, 0, 0, kind));
+        .or_insert((0, 0, 0, 0, kind));
     e.0 += 1;
     e.1 += len as u64;
-    e.2 += us;
+    e.2 += copied as u64;
+    e.3 += us;
 }
 
 /// Our own allocations alive now, by size of block (under 4 KiB, to 64 KiB,
@@ -1390,8 +1393,8 @@ pub(crate) fn log(frames: f64) {
     log_memory();
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();
-    ranges.sort_by_key(|&(_, (_, bytes, _, _))| std::cmp::Reverse(bytes));
-    for ((src, len), (n, bytes, us, _)) in ranges.into_iter().take(10) {
+    ranges.sort_by_key(|&(_, (_, _, copied, _, _))| std::cmp::Reverse(copied));
+    for ((src, len), (n, asked, bytes, us, _)) in ranges.into_iter().take(10) {
         use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
         // SAFETY: plain data filled in by the query.
         let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
@@ -1399,9 +1402,10 @@ pub(crate) fn log(frames: f64) {
         unsafe { VirtualQuery(src as *const _, &mut info, size_of_val(&info)) };
         let kind = info.Type;
         tracing::info!(
-            "  copied from {src:#x}+{len:#x} (memory {kind:#x}): {:.1}x/frame, {:.2} MB/frame, {:.2} ms/frame",
+            "  copied from {src:#x}+{len:#x} (memory {kind:#x}): {:.1}x/frame, {:.2} MB/frame copied of {:.2} asked, {:.2} ms/frame",
             n as f64 / frames,
             bytes as f64 / 1e6 / frames,
+            asked as f64 / 1e6 / frames,
             us as f64 / 1e3 / frames
         );
     }

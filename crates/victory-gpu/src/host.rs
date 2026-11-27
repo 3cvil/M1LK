@@ -7808,7 +7808,7 @@ impl Batch {
         prof.end(crate::copyprof::Slot::Update, copied);
         let us = started.elapsed().as_micros() as u64;
         #[cfg(feature = "diagnostics")]
-        crate::copystat::range(from, to - from, us, 0);
+        crate::copystat::range(from, to - from, copied, us, 0);
         PREPARING[0].fetch_add(us, Ordering::Relaxed);
         PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
     }

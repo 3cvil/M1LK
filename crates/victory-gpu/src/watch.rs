@@ -46,6 +46,11 @@ struct Journal {
     /// from the journal, without another kernel call.
     ahead: Vec<(usize, usize)>,
     ahead_asked: u64,
+    /// (M1LK Rennet) Page ranges of view memory guarded again, all at once,
+    /// when the submission's one asking was made ([`ask_once`]); sorted,
+    /// disjoint. [`writes`] answers guarded askings inside one from the
+    /// journal (under `ahead_asked`) until the asking ends.
+    rennet: Vec<(usize, usize)>,
     /// The ahead asking stands for a whole submission ([`ask_once`]): no
     /// other ahead asking is made, and `ahead` stays, until
     /// [`ask_once_end`].
@@ -58,6 +63,7 @@ const EMPTY_JOURNAL: Journal = Journal {
     found: Vec::new(),
     ahead: Vec::new(),
     ahead_asked: 0,
+    rennet: Vec::new(),
     kept: false,
 };
 static JOURNAL: Mutex<Journal> = Mutex::new(EMPTY_JOURNAL);
@@ -149,6 +155,7 @@ fn ask_groups(j: &mut Journal, pieces: &[(usize, usize)], gap: usize) {
     j.asked += 1;
     j.ahead_asked = j.asked;
     j.ahead.clear();
+    j.rennet.clear();
     let mut i = 0;
     while i < pieces.len() {
         let first = pieces[i].0;
@@ -196,6 +203,7 @@ pub(crate) fn ask_ahead_done() {
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
     if !j.kept {
         j.ahead.clear();
+        j.rennet.clear();
     }
 }
 
@@ -243,12 +251,81 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
     // such range asked again at each of its 70 flushes (run 76: 2,300
     // askings a frame with the switch on, as without it). They are asked
     // here, once; what is not write-watched stays with `writes`.
+    let rennet_on = rennet();
+    let mut left = Vec::new();
     for (first, last) in pieces {
-        if !j.ahead.iter().any(|&(a, b)| a <= first && last <= b) && ask_kernel(j, first, last) {
+        if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+            continue;
+        }
+        if ask_kernel(j, first, last) {
             j.ahead.push((first, last));
+        } else if rennet_on {
+            left.push((first * PAGE, last * PAGE));
         }
     }
-    j.kept = !j.ahead.is_empty();
+    // M1LK Rennet: what is not write-watched and is view memory is guarded
+    // again here, in one pass, before any of the submission's copies.
+    if !left.is_empty() {
+        let now = j.ahead_asked;
+        let answers = guard_many(&left);
+        for (&(start, end), answer) in left.iter().zip(answers) {
+            let Some(written) = answer else { continue };
+            for page in written {
+                // Never lower a later number (`wrote`).
+                let at = j.written.entry(page).or_insert(now);
+                *at = (*at).max(now);
+            }
+            j.rennet.push((start / PAGE, end / PAGE));
+        }
+        j.rennet = merge_runs(std::mem::take(&mut j.rennet));
+    }
+    j.kept = !j.ahead.is_empty() || !j.rennet.is_empty();
+}
+
+/// Whether a submission's view memory is guarded again in one coalesced
+/// pass when its one asking is made ([`ask_once`]), not range by range at
+/// each refresh (M1LK Rennet, `VICTORY_RENNET=1`; off by default).
+///
+/// Each refresh of a copy of view memory took the guards' lock and made
+/// its written blocks (and their other views) read-only again, one
+/// `VirtualProtect` per run and per alias block: 27 ms a frame walking,
+/// over 2,165 askings, every call a TLB shootdown, all behind the lock the
+/// write faults wait on. With the switch the submission's ranges are
+/// guarded together, adjacent blocks of one region (and alias blocks) in
+/// one call, before any of its copies runs; its refreshes then answer from
+/// the journal. A block is always made read-only before the copy that
+/// takes it, so no write between the two is lost: it faults, opens the
+/// block, and the next submission copies it again.
+pub(crate) fn rennet() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_RENNET").is_some_and(|v| v == "1");
+        tracing::info!(
+            "M1LK Rennet: {} (VICTORY_RENNET): coalesced re-guard of a submission's view memory",
+            if on { "on" } else { "off" }
+        );
+        on
+    })
+}
+
+/// Sorted, disjoint half-open runs covering `runs` (touching ones joined).
+fn merge_runs(mut runs: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    runs.retain(|&(a, b)| a < b);
+    runs.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(runs.len());
+    for (a, b) in runs {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// Whether pages `[first, last)` lie in one range of [`Journal::rennet`].
+fn in_rennet(j: &Journal, first: usize, last: usize) -> bool {
+    let i = j.rennet.partition_point(|&(a, _)| a <= first);
+    i > 0 && j.rennet[i - 1].1 >= last
 }
 
 /// The submission's one asking stands no longer: its refreshes are done,
@@ -258,6 +335,7 @@ pub(crate) fn ask_once_end() {
     if j.kept {
         j.kept = false;
         j.ahead.clear();
+        j.rennet.clear();
     }
 }
 
@@ -409,6 +487,30 @@ mod skip_tests {
 }
 
 #[cfg(test)]
+mod rennet_tests {
+    use super::{EMPTY_JOURNAL, Journal, in_rennet, merge_runs};
+
+    #[test]
+    fn runs_merge_where_they_touch_or_overlap() {
+        assert_eq!(merge_runs(vec![(5, 7), (0, 2), (2, 3), (6, 9), (4, 4), (11, 12)]), vec![(0, 3), (5, 9), (11, 12)]);
+        assert_eq!(merge_runs(Vec::new()), Vec::new());
+    }
+
+    #[test]
+    fn only_ranges_inside_one_guarded_run_are_answered() {
+        let j = Journal { rennet: vec![(10, 20), (30, 40)], ..EMPTY_JOURNAL };
+        assert!(in_rennet(&j, 10, 20));
+        assert!(in_rennet(&j, 12, 13));
+        assert!(in_rennet(&j, 30, 40));
+        assert!(!in_rennet(&j, 9, 12));
+        assert!(!in_rennet(&j, 19, 21));
+        assert!(!in_rennet(&j, 20, 30));
+        assert!(!in_rennet(&j, 41, 42));
+        assert!(!in_rennet(&EMPTY_JOURNAL, 0, 1));
+    }
+}
+
+#[cfg(test)]
 mod quiet_tests {
     use super::{Journal, quiet};
 
@@ -447,8 +549,9 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
     lock.end(crate::copyprof::Slot::JournalLock, 0);
     let j = &mut *j;
-    // Asked ahead with the submission's other ranges: the journal has it.
-    if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+    // Asked ahead with the submission's other ranges (or, for guarded
+    // callers, guarded again with them: M1LK Rennet): the journal has it.
+    if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) || (guarded && in_rennet(j, first, last)) {
         return Some((
             j.ahead_asked,
             j.written
@@ -761,9 +864,8 @@ pub(crate) fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
     // pages: 0.6 ms for the title's 174 MB heap, 16 times a frame, and most
     // of the 68 ms a frame of "guards" (run 58).
     // `VICTORY_GUARD_ASK=1` asks every time, as before.
-    static ASK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // (Neptune) Without the guards' lock: the tables mirror the sets ([`PROTECTED`], [`ABSENT`]).
-    let known = !*ASK.get_or_init(|| std::env::var_os("VICTORY_GUARD_ASK").is_some_and(|v| v == "1")) && {
+    let known = !guard_ask() && {
         let first = start / BLOCK;
         // `VICTORY_WATCH_LOCKFREE=1` (off by default): the tables answer; else the guards do.
         static FREE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -780,7 +882,70 @@ pub(crate) fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
     install();
     let mut g = guards();
     let mut written = Vec::new();
-    let (first, last) = (start / BLOCK, end.div_ceil(BLOCK));
+    guard_locked(&mut g, start / BLOCK, end.div_ceil(BLOCK), &mut written, protect);
+    Some(written)
+}
+
+/// `VICTORY_GUARD_ASK=1`: [`guard`] asks Windows whether a range is a view
+/// every time.
+fn guard_ask() -> bool {
+    static ASK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ASK.get_or_init(|| std::env::var_os("VICTORY_GUARD_ASK").is_some_and(|v| v == "1"))
+}
+
+/// (M1LK Rennet) [`guard`] for many byte ranges at once, each answered as
+/// `guard` answers it, with the guards' lock taken once for all and the
+/// blocks to make read-only gathered first and set in one coalesced pass
+/// ([`protect_coalesced`]) before returning: before the caller copies any.
+pub(crate) fn guard_many(ranges: &[(usize, usize)]) -> Vec<Option<Vec<usize>>> {
+    let known: Vec<bool> = if guard_ask() {
+        vec![false; ranges.len()]
+    } else {
+        let g = guards();
+        ranges
+            .iter()
+            .map(|&(start, _)| g.protected.contains(&(start / BLOCK)) || g.absent.contains(&(start / BLOCK)))
+            .collect()
+    };
+    // Windows is asked without the guards' lock, as `guard` does.
+    let views: Vec<bool> = ranges
+        .iter()
+        .zip(known)
+        .map(|(&(start, end), known)| start < end && (known || is_view(start, end)))
+        .collect();
+    if !views.iter().any(|&v| v) {
+        return vec![None; ranges.len()];
+    }
+    install();
+    let mut g = guards();
+    let mut pending = Vec::new();
+    let answers: Vec<Option<Vec<usize>>> = ranges
+        .iter()
+        .zip(&views)
+        .map(|(&(start, end), &view)| {
+            view.then(|| {
+                let mut written = Vec::new();
+                guard_locked(&mut g, start / BLOCK, end.div_ceil(BLOCK), &mut written, |_, from, to| {
+                    pending.push((from, to));
+                });
+                written
+            })
+        })
+        .collect();
+    protect_coalesced(&mut g, pending);
+    answers
+}
+
+/// The body of [`guard`] for blocks `[first, last)` under the guards' lock:
+/// the pages written since last guarded go to `written`, and each run of
+/// blocks to make read-only to `protect`.
+fn guard_locked(
+    g: &mut Guards,
+    first: usize,
+    last: usize,
+    written: &mut Vec<usize>,
+    mut protect: impl FnMut(&mut Guards, usize, usize),
+) {
     let mut uncommitted_until = first;
     for gap in g.clean.gaps(first, last) {
         let mut run = None;
@@ -793,7 +958,7 @@ pub(crate) fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
                 }
                 if block < uncommitted_until {
                     if let Some(from) = run.take() {
-                        protect(&mut g, from, block);
+                        protect(&mut *g, from, block);
                     }
                     continue;
                 }
@@ -809,14 +974,13 @@ pub(crate) fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
                 continue;
             }
             if let Some(from) = run.take() {
-                protect(&mut g, from, block);
+                protect(&mut *g, from, block);
             }
         }
         if let Some(from) = run.take() {
-            protect(&mut g, from, gap.end);
+            protect(&mut *g, from, gap.end);
         }
     }
-    Some(written)
 }
 
 /// Whether `[start, end)` is view memory. The title's views lie in
@@ -871,6 +1035,17 @@ fn is_view(start: usize, end: usize) -> bool {
 /// `VICTORY_VIEW_GUARD=0` leaves the other views as they are, as before.
 fn protect(g: &mut Guards, from: usize, to: usize) {
     protect_here(g, from, to);
+    let mut aliases = Vec::new();
+    aliases_of(g, from, to, &mut aliases);
+    for alias in aliases {
+        protect_alias(g, alias);
+    }
+}
+
+/// The other views' blocks of blocks `[from, to)` to guard with them (to
+/// `out`), each noted aliased ([`Guards::aliased`]); none with
+/// `VICTORY_VIEW_GUARD=0`.
+fn aliases_of(g: &mut Guards, from: usize, to: usize, out: &mut Vec<usize>) {
     if !view_guard() {
         return;
     }
@@ -891,7 +1066,7 @@ fn protect(g: &mut Guards, from: usize, to: usize) {
                 let alias = alias / BLOCK;
                 g.aliased.insert(alias);
                 if alias != block {
-                    protect_alias(g, alias);
+                    out.push(alias);
                 }
             }
         }
@@ -936,7 +1111,8 @@ fn protect_alias(g: &mut Guards, block: usize) {
 }
 
 /// [`protect`] for one range, without the other views of its pages.
-fn protect_here(g: &mut Guards, from: usize, to: usize) {
+/// Returns the `VirtualProtect` calls made and the blocks made read-only.
+fn protect_here(g: &mut Guards, from: usize, to: usize) -> (u64, u64) {
     use windows_sys::Win32::System::Memory::{PAGE_READONLY, VirtualProtect};
     let set = |from: usize, to: usize| {
         let mut old = 0;
@@ -957,16 +1133,88 @@ fn protect_here(g: &mut Guards, from: usize, to: usize) {
     };
     if set(from, to) {
         note(g, from, to);
-        return;
+        return (1, (to - from) as u64);
     }
+    let mut noted = 0;
     for block in from..to {
         if set(block, block + 1) {
             note(g, block, block + 1);
+            noted += 1;
         } else if block < uncommitted_end(block) {
             g.absent.insert(block);
             absent_set(block, true);
         }
     }
+    (1 + (to - from) as u64, noted)
+}
+
+/// (M1LK Rennet) Makes the block runs `runs` read-only as [`protect`] does
+/// each, in as few `VirtualProtect` calls as the memory allows: touching
+/// runs are joined, a joined run is cut only where Windows' regions end
+/// (one call per region; whole uncommitted regions are noted absent with no
+/// call), and the other views' blocks of them all are set together, a call
+/// per contiguous run of those.
+fn protect_coalesced(g: &mut Guards, runs: Vec<(usize, usize)>) {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_FREE, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_READONLY, VirtualProtect,
+        VirtualQuery,
+    };
+    let runs = merge_runs(runs);
+    let (mut calls, mut blocks) = (0u64, 0u64);
+    for &(from, to) in &runs {
+        let mut at = from;
+        while at < to {
+            // SAFETY: plain data filled in by the query.
+            let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: a valid out pointer of the right size.
+            let n = unsafe { VirtualQuery((at * BLOCK) as *const _, &mut info, size_of_val(&info)) };
+            let end = if n == 0 {
+                at
+            } else {
+                ((info.BaseAddress as usize).saturating_add(info.RegionSize) / BLOCK).min(to)
+            };
+            if end > at && matches!(info.State, MEM_RESERVE | MEM_FREE) {
+                for block in at..end {
+                    g.absent.insert(block);
+                    absent_set(block, true);
+                }
+                at = end;
+                continue;
+            }
+            let stop = if end > at && info.State == MEM_COMMIT { end } else { at + 1 };
+            let (c, b) = protect_here(g, at, stop);
+            calls += c;
+            blocks += b;
+            at = stop;
+        }
+    }
+    let mut aliases = Vec::new();
+    for &(from, to) in &runs {
+        aliases_of(g, from, to, &mut aliases);
+    }
+    aliases.retain(|block| !g.protected.contains(block));
+    let aliases = merge_runs(aliases.into_iter().map(|block| (block, block + 1)).collect());
+    for (from, to) in aliases {
+        let mut old = 0;
+        calls += 1;
+        // SAFETY: title view memory; only its protection changes.
+        if unsafe { VirtualProtect((from * BLOCK) as *const _, (to - from) * BLOCK, PAGE_READONLY, &mut old) } != 0 {
+            for block in from..to {
+                g.protected.insert(block);
+                protected_set(block, true);
+            }
+            blocks += (to - from) as u64;
+            continue;
+        }
+        for block in from..to {
+            calls += 1;
+            let before = g.protected.len();
+            protect_alias(g, block);
+            blocks += (g.protected.len() - before) as u64;
+        }
+    }
+    crate::prof::count(crate::prof::C::RennetProtectCalls, calls);
+    crate::prof::count(crate::prof::C::RennetBlocks, blocks);
 }
 
 /// The end (exclusive) of the whole uncommitted blocks starting at `block`.
@@ -1799,6 +2047,33 @@ pub(crate) mod tests {
         unsafe { ((other + BLOCK + 8) as *mut u8).write(1) };
         assert_eq!(guard(guarded, guarded + SIZE), Some(vec![pages(1)]));
         assert_eq!(guard(guarded, guarded + SIZE), Some(Vec::new()));
+        drop_views(section, &[guarded, other], SIZE);
+    }
+
+    /// M1LK Rennet: many ranges guarded in one coalesced pass answer as
+    /// `guard` answers each, and leave the blocks (and their other views)
+    /// read-only, so a write after the pass is reported at the next check.
+    #[test]
+    fn many_ranges_guarded_together_answer_as_one_by_one() {
+        const SIZE: usize = 4 * BLOCK;
+        let (section, guarded, other) = two_views(SIZE);
+        let pages = |block: usize| (guarded + block * BLOCK) / PAGE;
+        let halves = [(guarded, guarded + 2 * BLOCK), (guarded + 2 * BLOCK, guarded + SIZE)];
+        assert_eq!(guard_many(&halves), vec![Some(vec![pages(0), pages(1)]), Some(vec![pages(2), pages(3)])]);
+        assert_eq!(guard_many(&halves), vec![Some(Vec::new()), Some(Vec::new())], "nothing written yet");
+        // The other view was guarded with it: a write there faults and
+        // opens both.
+        // SAFETY: the second view, read-write once the handler has opened it.
+        unsafe { ((other + 3 * BLOCK + 8) as *mut u8).write(1) };
+        assert_eq!(guard_many(&halves), vec![Some(Vec::new()), Some(vec![pages(3)])]);
+        assert_eq!(guard(guarded, guarded + SIZE), Some(Vec::new()));
+        // SAFETY: the guarded view, read-write once the handler has opened it.
+        unsafe { ((guarded + 8) as *mut u8).write(2) };
+        assert_eq!(guard_many(&[(guarded, guarded + SIZE)]), vec![Some(vec![pages(0)])]);
+        // Memory that is no view is left to the caller.
+        let heap = vec![0u8; 2 * BLOCK];
+        let at = heap.as_ptr() as usize;
+        assert_eq!(guard_many(&[(at, at + heap.len())]), vec![None]);
         drop_views(section, &[guarded, other], SIZE);
     }
 
