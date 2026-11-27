@@ -115,6 +115,34 @@ pub fn format_report(threads: &[ThreadStats], resolve: &mut dyn Resolve, top_lea
     out
 }
 
+/// Is `sp` a place to read a return address from: 8-aligned and inside the
+/// thread's stack `[lo, hi)` with room for one more word? With no bounds
+/// known (`hi == 0`) nothing is.
+pub fn stack_pointer_ok(sp: u64, lo: u64, hi: u64) -> bool {
+    hi != 0 && sp >= lo && sp & 7 == 0 && sp.checked_add(16).is_some_and(|end| end < hi)
+}
+
+/// Does a function table entry (`begin..end`, image-relative) cover `pc`
+/// (image-relative), and does it point at plain unwind data (not a chained
+/// entry, bit 0)? An entry that fails this is not unwound with.
+pub fn entry_ok(begin: u32, end: u32, unwind: u32, pc_rva: u64) -> bool {
+    begin < end && pc_rva >= u64::from(begin) && pc_rva < u64::from(end) && unwind & 1 == 0 && unwind != 0
+}
+
+/// The unwind data's first bytes: version 1 or 2, no machine-frame code
+/// (opcode 10), and the whole code array (`4 + 2 * count` bytes) lies within
+/// `readable` bytes and within `data`.
+pub fn unwind_info_ok(data: &[u8], readable: usize) -> bool {
+    if data.len() < 4 || !matches!(data[0] & 7, 1 | 2) {
+        return false;
+    }
+    let need = 4 + 2 * usize::from(data[2]);
+    if need > readable || data.len() < need {
+        return false;
+    }
+    !data[4..need].chunks_exact(2).any(|code| code[1] & 0xf == 10)
+}
+
 /// `M1LK_SAMPLE_PROF=1`: the profiler is on. Read once.
 pub fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -133,7 +161,11 @@ pub fn finish() {}
 
 #[cfg(windows)]
 mod imp {
-    use super::{Resolve, ThreadStats, format_report, on};
+    use super::{Resolve, ThreadStats, entry_ok, format_report, on, stack_pointer_ok, unwind_info_ok};
+    use std::sync::atomic::{AtomicPtr, AtomicU32};
+    use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS};
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    use windows_sys::Win32::System::Threading::ExitThread;
     use std::collections::HashMap;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,6 +216,83 @@ mod imp {
         affinity: usize,
         priority: i32,
         base_priority: i32,
+    }
+
+    /// Set once the sampler thread is gone (stopped, or ended by a fault).
+    static DEAD: AtomicBool = AtomicBool::new(false);
+    /// Asked to stop (the run is ending, modules are about to go).
+    static STOP: AtomicBool = AtomicBool::new(false);
+    /// The sampler thread's id, for the fault guard; 0 before it runs.
+    static SAMPLER_TID: AtomicU32 = AtomicU32::new(0);
+    /// The handle of the thread suspended right now, to resume if the sampler faults.
+    static SUSPENDED: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    /// Where a faulting sampler thread is sent: resume what it suspended, mark
+    /// the sampler dead and end only this thread. The game goes on.
+    unsafe extern "system" fn sampler_fault_exit() -> ! {
+        let held = SUSPENDED.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if !held.is_null() {
+            // SAFETY: the handle of the thread this thread suspended, still open.
+            unsafe { ResumeThread(held) };
+        }
+        DEAD.store(true, Ordering::SeqCst);
+        // SAFETY: ends the calling (sampler) thread.
+        unsafe { ExitThread(0) }
+    }
+
+    /// First in line: a memory fault on the sampler thread (a bad unwind, a
+    /// symbol lookup into an unloaded module) ends the sampler, not the game.
+    unsafe extern "system" fn guard(info: *mut EXCEPTION_POINTERS) -> i32 {
+        // SAFETY: the system passes valid exception pointers.
+        unsafe {
+            let code = (*(*info).ExceptionRecord).ExceptionCode as u32;
+            let mine = SAMPLER_TID.load(Ordering::Relaxed);
+            if mine != 0 && GetCurrentThreadId() == mine && matches!(code, 0xC000_0005 | 0xC000_0006 | 0xC000_001D | 0xC000_0094) {
+                let ctx = &mut *(*info).ContextRecord;
+                ctx.Rip = sampler_fault_exit as usize as u64;
+                // As if called: aligned, with a return address slot and shadow space.
+                ctx.Rsp = (ctx.Rsp.saturating_sub(0x200) & !0xf) - 8;
+                return -1; // EXCEPTION_CONTINUE_EXECUTION
+            }
+        }
+        0 // EXCEPTION_CONTINUE_SEARCH
+    }
+
+    /// The memory at `addr` as `(committed, bytes readable from addr to the region's end)`.
+    fn region(addr: u64) -> (bool, usize) {
+        // SAFETY: a zeroed MEMORY_BASIC_INFORMATION is valid; a query of our own address space.
+        unsafe {
+            let mut info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            if VirtualQuery(addr as usize as *const c_void, &mut info, size_of::<MEMORY_BASIC_INFORMATION>()) == 0 {
+                return (false, 0);
+            }
+            let end = info.BaseAddress as u64 + info.RegionSize as u64;
+            (info.State == MEM_COMMIT, end.saturating_sub(addr) as usize)
+        }
+    }
+
+    /// Is the function entry safe to unwind with at `pc`: it covers `pc`, and
+    /// its unwind data lies in committed memory with a sane header.
+    ///
+    /// # Safety
+    /// `entry` points at a function table entry (three `u32`).
+    unsafe fn entry_usable(base: u64, entry: *const u32, pc: u64) -> bool {
+        // SAFETY: the entry's fields are read; the unwind data only after the
+        // region query says it is committed.
+        unsafe {
+            let (begin, end, unwind) = (entry.read(), entry.add(1).read(), entry.add(2).read());
+            if base == 0 || !entry_ok(begin, end, unwind, pc.wrapping_sub(base)) {
+                return false;
+            }
+            let at = base + u64::from(unwind);
+            let (committed, readable) = region(at);
+            if !committed || readable < 4 {
+                return false;
+            }
+            let count = (at as *const u8).add(2).read();
+            let have = readable.min(4 + 2 * usize::from(count));
+            unwind_info_ok(std::slice::from_raw_parts(at as *const u8, have), readable)
+        }
     }
 
     struct Target {
@@ -276,6 +385,7 @@ mod imp {
             if SuspendThread(target.handle) == u32::MAX {
                 return 0;
             }
+            SUSPENDED.store(target.handle, Ordering::SeqCst);
             ctx.ContextFlags = CONTEXT_CONTROL_AMD64 | CONTEXT_INTEGER_AMD64;
             if GetThreadContext(target.handle, ctx) != 0 {
                 let mut rip = ctx.Rip;
@@ -284,11 +394,18 @@ mod imp {
                     frames[n] = if n == 0 { rip } else { rip - 1 };
                     n += 1;
                     let sp = ctx.Rsp;
-                    if n == MAX_FRAMES || hi == 0 || sp < lo || sp.saturating_add(16) >= hi || sp & 7 != 0 {
+                    if n == MAX_FRAMES || !stack_pointer_ok(sp, lo, hi) {
+                        break;
+                    }
+                    // Only code in committed memory is looked up and stepped into.
+                    if !region(frames[n - 1]).0 {
                         break;
                     }
                     let mut base = 0u64;
                     let entry = RtlLookupFunctionEntry(frames[n - 1], &mut base, std::ptr::null_mut());
+                    if !entry.is_null() && !entry_usable(base, entry.cast(), frames[n - 1]) {
+                        break;
+                    }
                     if entry.is_null() {
                         // A leaf without unwind data: the return address is on top.
                         rip = (sp as *const u64).read();
@@ -304,6 +421,7 @@ mod imp {
                     }
                 }
             }
+            SUSPENDED.store(std::ptr::null_mut(), Ordering::SeqCst);
             ResumeThread(target.handle);
         }
         n
@@ -518,6 +636,9 @@ mod imp {
         // SAFETY: a timer handle of our own.
         let timer = unsafe { CreateWaitableTimerExW(std::ptr::null(), std::ptr::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS) };
         let me = unsafe { GetCurrentThreadId() };
+        SAMPLER_TID.store(me, Ordering::SeqCst);
+        // SAFETY: registers `guard`, which only acts on this thread.
+        unsafe { AddVectoredExceptionHandler(1, Some(guard)) };
         let interval = interval_ms();
         let mut ids = Vec::new();
         let mut ctx: Box<CONTEXT> = Box::new(unsafe { std::mem::zeroed() });
@@ -525,7 +646,7 @@ mod imp {
         let mut next_list = Instant::now();
         let mut next_report = Instant::now() + Duration::from_secs(30);
         let mut skipped: Vec<u32> = Vec::new();
-        loop {
+        while !STOP.load(Ordering::SeqCst) {
             if timer.is_null() {
                 std::thread::sleep(Duration::from_millis(interval));
             } else {
@@ -590,6 +711,7 @@ mod imp {
                 write_report();
             }
         }
+        DEAD.store(true, Ordering::SeqCst);
     }
 
     /// Starts the sampling thread (once), if `M1LK_SAMPLE_PROF=1`.
@@ -606,7 +728,16 @@ mod imp {
     /// Writes the report now (at the end of a run), if the profiler is on.
     pub fn finish() {
         if on() && STARTED.load(Ordering::SeqCst) {
-            write_report();
+            // Stop sampling first: no thread is to be suspended while modules unload.
+            STOP.store(true, Ordering::SeqCst);
+            let until = Instant::now() + Duration::from_millis(500);
+            while !DEAD.load(Ordering::SeqCst) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // A sampler that faulted may have died holding the counts' lock: no report then.
+            if STATE.try_lock().is_ok() {
+                write_report();
+            }
         }
     }
 }
@@ -654,5 +785,41 @@ mod tests {
         assert!(has(inclusive, "100.00%", "  fn_9"));
         assert!(text.contains("fn_1 @ a.rs:4"));
         assert_eq!(format_report(&[], &mut Fake, 5, 5), "no samples yet\n");
+    }
+
+    #[test]
+    fn stack_pointer_is_checked_against_bounds() {
+        assert!(stack_pointer_ok(0x1000, 0x800, 0x2000));
+        assert!(!stack_pointer_ok(0x1004, 0x800, 0x2000));
+        assert!(!stack_pointer_ok(0x700, 0x800, 0x2000));
+        assert!(!stack_pointer_ok(0x1ff8, 0x800, 0x2000));
+        assert!(!stack_pointer_ok(0x1000, 0, 0));
+        assert!(!stack_pointer_ok(u64::MAX - 7, 0x800, u64::MAX));
+    }
+
+    #[test]
+    fn function_entry_must_cover_pc_and_have_plain_unwind_data() {
+        assert!(entry_ok(0x100, 0x200, 0x3000, 0x150));
+        assert!(!entry_ok(0x100, 0x200, 0x3000, 0x200));
+        assert!(!entry_ok(0x100, 0x200, 0x3000, 0xff));
+        assert!(!entry_ok(0x200, 0x100, 0x3000, 0x150));
+        assert!(!entry_ok(0x100, 0x200, 0x3001, 0x150));
+        assert!(!entry_ok(0x100, 0x200, 0, 0x150));
+    }
+
+    #[test]
+    fn unwind_header_is_validated() {
+        // version 1, two codes
+        let ok = [1u8, 0, 2, 0, 0x04, 0x01, 0x08, 0x04];
+        assert!(unwind_info_ok(&ok, 64));
+        assert!(!unwind_info_ok(&ok, 6));
+        let mut bad_version = ok;
+        bad_version[0] = 4;
+        assert!(!unwind_info_ok(&bad_version, 64));
+        let mut machine_frame = ok;
+        machine_frame[5] = 0x0a;
+        assert!(!unwind_info_ok(&machine_frame, 64));
+        assert!(!unwind_info_ok(&ok[..3], 64));
+        assert!(!unwind_info_ok(&ok[..6], 64));
     }
 }
