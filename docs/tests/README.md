@@ -93,5 +93,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 64 | 2026-11-27 | ladder step 3: Watch Skip + COPY_PLAIN | 1.6 | 4.3 | 16.8 | 138 | unchecked | 42* | [chart](test-64.svg) |
 | 65 | 2026-11-27 | ladder step 4: Watch Skip + COPY_PLAIN + M1LK Curd (constant uploads... | 1.8 | 3.8 | 16.8 | 139 | unchecked | 43* | [chart](test-65.svg) |
 | 66 | 2026-11-27 | profiling run: submit-path time split into lock waits, card waits, bu... | 2.4 | 4 | 16.9 | 150 | unchecked | 40* | [chart](test-66.svg) |
+| 67 | 2026-11-27 | rounds 2+4 in one run: 9 changes (incl. batched write-watch asks) swi... | 1.9 | 4.5 | 16.6 | 135 | unchecked | 43* | [chart](test-67.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
