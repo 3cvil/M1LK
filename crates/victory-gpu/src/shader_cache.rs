@@ -108,6 +108,18 @@ fn build() -> &'static [u8; 32] {
             }
             hash.update(&[0]);
         }
+        // The picture switches (translation-changing, off by default) too.
+        for name in victory_shader::emit::PICTURE_SWITCHES {
+            for prefix in ["M1LK_", "VICTORY_"] {
+                let var = format!("{prefix}{name}");
+                hash.update(var.as_bytes());
+                hash.update(b"=");
+                if let Some(value) = std::env::var_os(&var) {
+                    hash.update(value.as_encoded_bytes());
+                }
+                hash.update(&[0]);
+            }
+        }
         *hash.finalize().as_bytes()
     })
 }

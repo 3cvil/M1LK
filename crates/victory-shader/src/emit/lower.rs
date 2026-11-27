@@ -1783,6 +1783,30 @@ fn helper_first_lane() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_HELPER_FIRSTLANE").is_some_and(|v| v == "1"))
 }
 
+/// Picture-correctness switches ported from other forks, all off unless set to `1`
+/// (`M1LK_<NAME>` or `VICTORY_<NAME>`), read once at start: they change translated code, so
+/// each is part of the shader cache key (see [`PICTURE_SWITCHES`]).
+pub const PICTURE_SWITCHES: &[&str] = &["LEGACY_FMA", "NAN_GUARD"];
+
+fn picture_switch(name: &str) -> bool {
+    ["M1LK_", "VICTORY_"].iter().any(|p| std::env::var_os(format!("{p}{name}")).is_some_and(|v| v == "1"))
+}
+
+/// `LEGACY_FMA=1`: `v_mad_legacy_f32` and `v_mac_legacy_f32` as one fused multiply-add of
+/// flushed sources, as RDNA 2 decodes them (VIctory-reloaded 8f40c451).
+fn legacy_fma() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| picture_switch("LEGACY_FMA"))
+}
+
+/// `NAN_GUARD=1`: a float exported to a colour target, or stored to a typed image, has NaN
+/// made 0 and an infinity +-65504, so one bad pixel does not stay in a history the title
+/// blends into each frame (VIctory-reloaded d8247162).
+fn nan_guard_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| picture_switch("NAN_GUARD"))
+}
+
 /// `VICTORY_FMAC_ACC_MODS=1`: `v_fmac_f32` in VOP3 applies abs/neg bit 2 to its accumulator.
 /// Off by default (the bit is ignored, as before). Part of the shader cache key.
 fn fmac_acc_mods() -> bool {
@@ -4563,15 +4587,88 @@ impl<'a> Lower<'a> {
         self.s.m.cast(c, Cast::Trunc, hi, self.s.t.i32)
     }
 
-    /// `0 × anything = 0`, as in D3D9.
+    /// `0 × anything = 0`, as in D3D9. As on RDNA2, a denormal operand counts
+    /// as zero, so the test is on the exponent bits rather than a float
+    /// compare (whose result would depend on the host's denormal mode).
+    /// (VIctory-reloaded b7a99ac4.)
     fn legacy_mul(&mut self, a: V, b: V) -> V {
         let c = self.cur;
         let m = self.s.m.bin(c, Bin::Mul, a, b);
+        let exp = self.s.m.i32(0x7F80_0000);
+        let izero = self.s.m.i32(0);
+        let is_zero = |l: &mut Self, v: V| {
+            let bits = l.as_int(v);
+            let e = l.s.m.bin(c, Bin::And, bits, exp);
+            l.s.m.cmp(c, pred::EQ, e, izero)
+        };
+        let az = is_zero(self, a);
+        let bz = is_zero(self, b);
+        let z = self.s.m.bin(c, Bin::Or, az, bz);
+        let zero = self.s.m.f32(0);
+        self.s.m.select(c, z, zero, m)
+    }
+
+    /// `NAN_GUARD` (off unless `1`): NaN made 0 and an infinity +-65504, so one bad pixel
+    /// does not stay in a history the title blends into each frame. `strict` (float
+    /// targets): every NaN. Otherwise only the NaNs the GPU makes (0x7FC00000, either
+    /// sign) and infinities: a typed store may carry an integer's bits. (VIctory-reloaded
+    /// d8247162, from a fork's 0e5f4b2a.)
+    fn nan_guard(&mut self, f: V, strict: bool) -> V {
+        if !nan_guard_enabled() {
+            return f;
+        }
+        let c = self.cur;
+        let bits = self.as_int(f);
+        let mag = self.s.m.i32(0x7FFF_FFFF);
+        let abs = self.s.m.bin(c, Bin::And, bits, mag);
+        let inf_bits = self.s.m.i32(0x7F80_0000);
+        let nan = if strict {
+            self.s.m.cmp(c, pred::IUGT, abs, inf_bits)
+        } else {
+            let quiet = self.s.m.i32(0x7FC0_0000);
+            self.s.m.cmp(c, pred::EQ, abs, quiet)
+        };
+        let inf = self.s.m.cmp(c, pred::EQ, abs, inf_bits);
+        let sign_bit = self.s.m.i32(0x8000_0000);
+        let sign = self.s.m.bin(c, Bin::And, bits, sign_bit);
+        let big = self.s.m.i32(65504f32.to_bits());
+        let big = self.s.m.bin(c, Bin::Or, sign, big);
+        let zero = self.s.m.i32(0);
+        let r = self.s.m.select(c, inf, big, bits);
+        let r = self.s.m.select(c, nan, zero, r);
+        self.as_float(r)
+    }
+
+    /// `x` with a subnormal flushed to the zero of its sign; every other
+    /// value as it is.
+    fn ftz(&mut self, x: V) -> V {
+        let c = self.cur;
+        let bits = self.as_int(x);
+        let exp = self.s.m.i32(0x7F80_0000);
+        let sign = self.s.m.i32(0x8000_0000);
+        let izero = self.s.m.i32(0);
+        let e = self.s.m.bin(c, Bin::And, bits, exp);
+        let sub = self.s.m.cmp(c, pred::EQ, e, izero);
+        let signed_zero = self.s.m.bin(c, Bin::And, bits, sign);
+        let flushed = self.s.m.select(c, sub, signed_zero, bits);
+        self.as_float(flushed)
+    }
+
+    /// `v_mad_legacy_f32` and `v_mac_legacy_f32` as RDNA 2 runs them: one fused
+    /// multiply-add of sources with their subnormals flushed, with the legacy rule
+    /// that a zero factor makes the product +0. (VIctory-reloaded 8f40c451, from
+    /// fxceless/victory-fork f6a09d3b.)
+    fn legacy_fmad(&mut self, a: V, b: V, acc: V) -> V {
+        let (a, b, acc) = (self.ftz(a), self.ftz(b), self.ftz(acc));
+        let c = self.cur;
+        let fused = self.fmad(a, b, acc);
         let zero = self.s.m.f32(0);
         let az = self.s.m.cmp(c, pred::OEQ, a, zero);
         let bz = self.s.m.cmp(c, pred::OEQ, b, zero);
         let z = self.s.m.bin(c, Bin::Or, az, bz);
-        self.s.m.select(c, z, zero, m)
+        // +0 + acc: the sign of a zero addend comes out of the addition.
+        let sum = self.s.m.bin(c, Bin::Add, zero, acc);
+        self.s.m.select(c, z, sum, fused)
     }
 
     // ---- lane booleans ----
@@ -8303,6 +8400,7 @@ impl<'a> Lower<'a> {
                         let m = self.s.m.bin(c, Bin::Mul, a, bb);
                         self.s.m.bin(c, Bin::Add, m, acc)
                     }
+                    _ if legacy_fma() => self.legacy_fmad(a, bb, acc),
                     _ => {
                         let m = self.legacy_mul(a, bb);
                         self.s.m.bin(c, Bin::Add, m, acc)
@@ -8312,12 +8410,16 @@ impl<'a> Lower<'a> {
             }
             "v_mad_f32" | "v_madak_f32" | "v_madmk_f32" | "v_mad_legacy_f32" => {
                 let (a, bb, cc) = (f(self, 0)?, f(self, 1)?, f(self, 2)?);
-                let m = if name == "v_mad_legacy_f32" {
-                    self.legacy_mul(a, bb)
+                let r = if name == "v_mad_legacy_f32" && legacy_fma() {
+                    self.legacy_fmad(a, bb, cc)
                 } else {
-                    self.s.m.bin(c, Bin::Mul, a, bb)
+                    let m = if name == "v_mad_legacy_f32" {
+                        self.legacy_mul(a, bb)
+                    } else {
+                        self.s.m.bin(c, Bin::Mul, a, bb)
+                    };
+                    self.s.m.bin(c, Bin::Add, m, cc)
                 };
-                let r = self.s.m.bin(c, Bin::Add, m, cc);
                 float(self, r)
             }
             "v_max3_f32" | "v_min3_f32" | "v_med3_f32" => {
@@ -10871,6 +10973,7 @@ impl<'a> Lower<'a> {
                     self.float_of(v)?
                 });
             }
+            let vals: Vec<V> = vals.into_iter().map(|v| self.nan_guard(v, false)).collect();
             let h = self.handle(site, src, false, props)?;
             let at = self.begin_guarded(guard);
             let mut args = vec![h];
@@ -12167,8 +12270,10 @@ impl<'a> Lower<'a> {
                     .op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[x]);
                 x = self.as_int(f);
             }
+            let pixel = self.s.pixel;
             let el = &mut elements(self, primitive)[id];
             el.usage |= 1 << col;
+            let target = !mesh && pixel && el.kind == 16 && el.comp == 9;
             let (suffix, mut x) = match el.comp {
                 9 if half.is_some() => (".f32", self.as_float(x)),
                 9 => {
@@ -12180,6 +12285,9 @@ impl<'a> Lower<'a> {
                 }
                 _ => (".i32", x),
             };
+            if target && suffix == ".f32" {
+                x = self.nan_guard(x, true);
+            }
             if let Some(rgb) = ambient.filter(|_| col < 3 && suffix == ".f32") {
                 let c = self.cur;
                 let base = self.s.m.extract(c, rgb, u32::from(col));

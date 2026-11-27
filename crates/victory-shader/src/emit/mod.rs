@@ -115,7 +115,7 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 pub use bitcode::census;
 pub use sampler::StaticSampler;
-pub use lower::{host_max_wave, set_host_max_wave};
+pub use lower::{host_max_wave, set_host_max_wave, PICTURE_SWITCHES};
 
 pub use rect::rect_list_gs;
 pub use shader::{

@@ -23,6 +23,8 @@
 //! | `LOWCOMMIT_BACKOFF` | start-only | commit behaviour of uploads and staging is set up at start |
 //! | `INPLACE_CONSTANTS` | start-only | regions and buffer forms are placed once; a title buffer cannot change form |
 //! | `GPU_DETILE` | start-only | textures kept detiled on the card or the PC stay so; the shader is made at start |
+//! | `LEGACY_FMA` | start-only | changes translated code (cached shaders); read by the translator once, part of the shader cache key |
+//! | `NAN_GUARD` | start-only | changes translated code (cached shaders); read by the translator once, part of the shader cache key |
 //!
 //! The schedule (`M1LK_TOGGLE_PLAN`, names joined by `,` or `+` (the test queue splits its env list on commas); see [`parse_plan`] and [`schedule`])
 //! names runtime-safe switches only. [`on_frame`] is called once a frame by
@@ -118,9 +120,12 @@ pub static WATCH_SCAN: Switch = Switch::new("WATCH_SCAN", false, is_one);
 pub static LOWCOMMIT_BACKOFF: Switch = Switch::new("LOWCOMMIT_BACKOFF", false, is_one);
 pub static INPLACE_CONSTANTS: Switch = Switch::new("INPLACE_CONSTANTS", false, is_one);
 pub static GPU_DETILE: Switch = Switch::new("GPU_DETILE", false, is_one);
+// Read by victory-shader itself (`emit::PICTURE_SWITCHES`); listed here so a plan naming them is refused.
+pub static LEGACY_FMA: Switch = Switch::new("LEGACY_FMA", false, is_one);
+pub static NAN_GUARD: Switch = Switch::new("NAN_GUARD", false, is_one);
 
 /// Every switch, runtime-safe and start-only.
-pub static ALL: [&Switch; 12] = [
+pub static ALL: [&Switch; 14] = [
     &COPY_PLAIN,
     &SHORT_REMAP_LOCK,
     &WIDE_REFRESH,
@@ -133,6 +138,8 @@ pub static ALL: [&Switch; 12] = [
     &LOWCOMMIT_BACKOFF,
     &INPLACE_CONSTANTS,
     &GPU_DETILE,
+    &LEGACY_FMA,
+    &NAN_GUARD,
 ];
 
 /// The switch of a name (with or without `M1LK_`/`VICTORY_`, any case).
@@ -369,13 +376,13 @@ mod tests {
     }
 
     #[test]
-    fn every_switch_has_one_name_and_the_four_start_only_are_marked() {
+    fn every_switch_has_one_name_and_the_start_only_are_marked() {
         let mut names: Vec<&str> = ALL.iter().map(|s| s.name).collect();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), ALL.len());
         let start_only: Vec<&str> = ALL.iter().filter(|s| !s.runtime_safe).map(|s| s.name).collect();
-        assert_eq!(start_only, vec!["WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE"]);
+        assert_eq!(start_only, vec!["WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE", "LEGACY_FMA", "NAN_GUARD"]);
     }
 
     #[test]
