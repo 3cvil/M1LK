@@ -488,8 +488,8 @@ Work in this order:
 4. Make the smallest correct change. Put new behaviour behind a VICTORY_* environment switch when it
    could change results on other hardware, and log once when it takes effect.
 5. Hard rules:
-   - Keep AMD paths working. Never remove or regress Radeon support; gate NVIDIA-only changes on what
-     the device reports (CheckFeatureSupport, vendor), not on assumptions.
+   - M1LK targets NVIDIA only (low-end RTX cards). AMD support is not required; AMD users should use
+     other projects.
    - No game names, title files, keys, saves, screenshots or data derived from a title in code,
      comments, tests, commits or the pull request. Say "the title".
    - No new downloads, network calls, binaries, build.rs scripts or git dependencies.
@@ -548,7 +548,7 @@ e-mail addresses).
   before you open it, and make sure they pass.
 - Say which hardware you tested on (GPU, VRAM, driver, CPU, RAM) and give before-and-after numbers for
   the same scene and settings: frame times, committed memory, VRAM.
-- Keep AMD paths working. Changes for NVIDIA must not remove or regress Radeon support.
+- M1LK is NVIDIA-only: changes do not need to keep AMD paths working.
 - If you port a change from another fork, credit the source in the pull request and the commit message.
   Its license must be compatible with GPL-3.0-or-later.
 - No game names, title files or anything derived from them in code, comments, tests or commits (see the

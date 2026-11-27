@@ -25,6 +25,6 @@ memory, dedicated GPU memory, and anything else the change targets. -->
 ## Checklist
 
 - [ ] `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass.
-- [ ] AMD paths still work (or the change does not touch them).
+- [ ] Tested on an NVIDIA card (M1LK is NVIDIA-only; AMD is not required).
 - [ ] If this ports code from another fork or project, the source is credited here and in the commit message, and its license is compatible with GPL-3.0-or-later.
 - [ ] No game names, title files or anything derived from them (see docs/asset-policy.md).
