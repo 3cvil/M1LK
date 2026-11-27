@@ -46,7 +46,7 @@ const RTV_RING: u32 = 1024;
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
     pub(crate) small_textures: crate::resource::SmallTextures,
-    queue: ID3D12CommandQueue,
+    pub(crate) queue: ID3D12CommandQueue,
     fence: ID3D12Fence,
     /// The last value signalled on `fence`, behind the submission lock.
     submitted: Mutex<u64>,
@@ -3959,6 +3959,9 @@ fn late_line(frames: f64) {
         }
     }
     crate::prof::line(frames);
+    if let Some(host) = host() {
+        crate::churn::line(host, frames);
+    }
     crate::port::log(frames);
     if late_exact() {
         let [pages, runs, bytes] = crate::shadow::merged_stats().map(|n| n as f64 / frames);
@@ -9164,7 +9167,12 @@ impl Host {
         let _ = title;
         // SAFETY: callers provide closed lists and retain them through the
         // corresponding queue fence.
-        unsafe { self.queue.ExecuteCommandLists(lists) };
+        if let Some(clock) = crate::churn::host(self) {
+            // (M1LK Churn Clock) The same lists with a card timestamp before and after.
+            clock.execute(&self.queue, lists, title);
+        } else {
+            unsafe { self.queue.ExecuteCommandLists(lists) };
+        }
         #[cfg(feature = "diagnostics")]
         {
             let elapsed = started.elapsed().as_micros() as u64;

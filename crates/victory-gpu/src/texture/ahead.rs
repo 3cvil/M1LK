@@ -489,12 +489,16 @@ impl Worker {
                 Ok(commands) => commands,
                 Err(error) => return Copied::Rejected(error),
             };
+            let sent = crate::churn::on().then(std::time::Instant::now);
             self.queue.ExecuteCommandLists(&[Some(commands)]);
             if let Err(error) = self.queue.Signal(&self.fence, value) {
                 return Copied::Uncertain(error);
             }
             let wait = self.fence.SetEventOnCompletion(value, HANDLE::default());
             let seen = self.fence.GetCompletedValue();
+            if let Some(sent) = sent {
+                crate::churn::ahead(sent.elapsed().as_micros() as u64);
+            }
             if seen != u64::MAX && seen >= value {
                 Copied::Complete
             } else {
