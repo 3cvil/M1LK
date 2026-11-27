@@ -61,6 +61,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 32 | 2026-11-27 | check: start from the cell autosave (pair runs share this start point... | 3.8 | 3.8 | 16.9 | 127 | unchecked | 42* | [chart](test-32.svg) |
 | 33 | 2026-11-27 | copy-plain + remap lock ON (its off pair was dropped; round 1 retests... | 3.8 | 4.3 | 16.1 | 138 | clean, faint smear | 45 | [chart](test-33.svg) |
 | 34 | 2026-11-27 | round 1 (combo a56b129): baseline A, every switch off | 4.4 | 4.5 | 17 | 156 | floating box, dither | 44 | [chart](test-34.svg) |
-| 35 | 2026-11-27 | round 1: ONE change on vs baseline: host copies read title memory in... | 4.3 | 4.5 | 17.4 | 136 | unchecked | 40* | [chart](test-35.svg) |
+| 35 | 2026-11-27 | round 1: ONE change on vs baseline: host copies read title memory in... | 4.3 | 4.5 | 17.4 | 136 | clean, faint smear | 42 | [chart](test-35.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
