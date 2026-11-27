@@ -39,10 +39,27 @@ jobs:
           git config --global user.name "m1lk-opencode[bot]"
           git config --global user.email "m1lk-opencode@users.noreply.github.com"
 
+      # Free models come and go, so pick the best one that is free right now from the live list.
+      # Order = our ranking for coding agents; anything free with tool support is the fallback.
+      - name: Pick the best free model
+        id: pick
+        run: |
+          prefer="deepseek-v4.1-flash-free mimo-v2.6-flash-free nemotron-3.5-super-vl-free beam-free big-pickle hy4-flash-free nemotron-3.5-lightning-free iceman-free seaglass-alpha-free flint-40b-free"
+          free=$(curl -fsS -m 30 https://opencode.ai/zen/v1/models | jq -r '.data[]
+            | select(.type == "chat" and .capabilities.tools.supported == true
+                     and .cost.text.input.price == 0 and .cost.text.output.price == 0) | .id' || true)
+          model=""
+          for m in $prefer; do if grep -qx "$m" <<<"$free"; then model="$m"; break; fi; done
+          [ -z "$model" ] && model=$(head -n 1 <<<"$free")
+          [ -z "$model" ] && model="deepseek-v4.1-flash-free"
+          case "$model" in *[!A-Za-z0-9._-]*) echo "unexpected model id"; exit 1;; esac
+          echo "Using opencode/$model (free now: $(echo $free))"
+          echo "model=opencode/$model" >> "$GITHUB_OUTPUT"
+
       - uses: anomalyco/opencode/github@f4e363c8295fa90a03dddc451882fffe8fbce357 # v1.19.6
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: opencode/deepseek-v4.1-flash-free
+          model: ${{ steps.pick.outputs.model }}
           use_github_token: true
