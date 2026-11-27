@@ -1248,7 +1248,10 @@ pub(crate) fn install() {
         }
         // A first touch of a lazily mapped page (`VICTORY_LAZY_COMMIT`),
         // read or write: committed, and the access goes on.
-        if crate::lazy::on_fault(r.ExceptionInformation[0], r.ExceptionInformation[1]) {
+        // Or of a lazily committed heap (M1LK Skim Milk).
+        if crate::lazy::on_fault(r.ExceptionInformation[0], r.ExceptionInformation[1])
+            || crate::heaplazy::on_fault(r.ExceptionInformation[0], r.ExceptionInformation[1])
+        {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
         if r.ExceptionInformation[0] != WRITE {

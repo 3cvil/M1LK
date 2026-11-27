@@ -139,6 +139,24 @@ pub extern "system" fn XMemVirtualAlloc(
             kind |= MEM_WRITE_WATCH;
         }
     }
+    // M1LK Skim Milk (`VICTORY_HEAP_LAZY=1`): a big fresh read-write commit
+    // is reserved only and committed on first touch (`victory_gpu::heaplazy`).
+    // Not 32-bit memory (arranged later by section views) nor placeholders;
+    // write watching is a reservation attribute and stays.
+    let lazy_heap = constrained
+        && !placeholder
+        && kind & MEM_COMMIT != 0
+        && flags & ADDRESS_32BIT == 0
+        && protect == PAGE_READWRITE
+        && victory_gpu::heap_lazy_min_bytes().is_some_and(|min| size >= min);
+    if lazy_heap {
+        kind &= !MEM_COMMIT;
+    } else if !constrained && kind & MEM_COMMIT != 0 {
+        // The title commits inside a lazy heap: its chunks are committed
+        // first, so this commit sets the protection the title asks for and
+        // no later lazy commit resets it.
+        victory_gpu::heap_lazy_ensure(base as usize, size);
+    }
     // SAFETY: the title's own arguments, cleaned of console bits; the
     // parameter points at `requirements`, which outlives the call.
     let at = unsafe {
@@ -178,6 +196,9 @@ pub extern "system" fn XMemVirtualAlloc(
         // SAFETY: restores this thread's error after logging.
         unsafe { SetLastError(error) };
     } else if base.is_null() {
+        if lazy_heap {
+            victory_gpu::heap_lazy_add(at as usize, size, protect);
+        }
         // What the title asked for is kept for `VICTORY_SKIP_WC_BACK`.
         #[cfg(windows)]
         victory_gpu::title_memory_reserved(at as usize, size, asked_kind, flags, asked_protect);
@@ -244,6 +265,13 @@ pub extern "system" fn XMemVirtualQuery(
         if info.host.State == MEM_RESERVE && victory_gpu::lazy_is_lazy(address as usize) {
             info.host.State = MEM_COMMIT;
             info.host.Protect = PAGE_READWRITE;
+        } else if info.host.State == MEM_RESERVE
+            && let Some(protect) = victory_gpu::heap_lazy_protect_at(address as usize)
+        {
+            // Untouched chunks of a lazy heap (M1LK Skim Milk) are the
+            // committed memory the title asked for.
+            info.host.State = MEM_COMMIT;
+            info.host.Protect = protect;
         }
         info.flags = if info.host.State == MEM_COMMIT {
             GRAPHICS

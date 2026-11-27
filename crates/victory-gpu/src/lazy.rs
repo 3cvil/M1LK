@@ -267,6 +267,8 @@ pub fn section_gone(section: usize) {
 /// runtime writes next (a kernel write fails on a reservation; it does not
 /// fault into the handler).
 pub fn ensure(at: usize, len: usize) {
+    // Lazy heaps too (M1LK Skim Milk).
+    crate::heaplazy::ensure(at, len);
     if len == 0 || LAZY.load(Relaxed) == 0 {
         return;
     }

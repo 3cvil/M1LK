@@ -87,6 +87,8 @@ mod wc_back;
 #[cfg(windows)]
 mod lazy;
 #[cfg(windows)]
+mod heaplazy;
+#[cfg(windows)]
 mod tiles;
 #[cfg(windows)]
 mod watch;
@@ -108,6 +110,11 @@ pub use wc_back::title_memory_reserved;
 pub use lazy::{
     ensure as lazy_ensure, is_lazy as lazy_is_lazy, mark_view as lazy_mark_view, on as lazy_commit_on,
     section_committed as lazy_section_committed, section_gone as lazy_section_gone, unmark as lazy_unmark,
+};
+#[cfg(windows)]
+pub use heaplazy::{
+    add as heap_lazy_add, ensure as heap_lazy_ensure, min_bytes as heap_lazy_min_bytes,
+    protect_at as heap_lazy_protect_at,
 };
 #[cfg(windows)]
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_view};
