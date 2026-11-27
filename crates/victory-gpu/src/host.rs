@@ -7813,6 +7813,13 @@ pub(crate) fn read(src: *const u8, dst: *mut u8, len: usize) -> bool {
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut done = 0;
+    // `JOURNAL_RWLOCK`: the kernel's own call, without the wrapper's checks
+    // (as vitutu1/victory-perf 4cb867b does for every refresh copy). A
+    // partial copy is a warning status, negative, and fails as before.
+    if victory_core::switches::JOURNAL_RWLOCK.is_on() {
+        // SAFETY: as below.
+        return unsafe { NtReadVirtualMemory(GetCurrentProcess(), src.cast(), dst.cast(), len, &mut done) >= 0 };
+    }
     // SAFETY: the destination is mapped writable memory of `len` bytes; the
     // kernel checks the source.
     unsafe { ReadProcessMemory(GetCurrentProcess(), src.cast(), dst.cast(), len, &mut done) != 0 }
@@ -7820,6 +7827,15 @@ pub(crate) fn read(src: *const u8, dst: *mut u8, len: usize) -> bool {
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
+    /// The kernel's read of a process's memory, `(process, address, buffer,
+    /// length, read out)`: an NTSTATUS, negative when a page is not there.
+    fn NtReadVirtualMemory(
+        process: *mut std::ffi::c_void,
+        base: *const std::ffi::c_void,
+        buffer: *mut std::ffi::c_void,
+        size: usize,
+        read: *mut usize,
+    ) -> i32;
     /// The kernel's write into a process's memory, `(process, address,
     /// bytes, length, written out)`: an NTSTATUS, negative when a page of
     /// the range is not there or not writable. It changes no protection.

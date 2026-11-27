@@ -87,6 +87,8 @@ pub(crate) struct HostHeap {
     /// table; one a shader picks by a computed index is brought up to date
     /// from here ([`HostHeap::texture_slots_due`]).
     textures: Mutex<TextureQueue>,
+    /// (`QUEUE_MARKS`) What `textures` holds, for reading without its lock.
+    marks: std::sync::Arc<QueueMarks>,
     texture_sweep: Mutex<TextureSweep>,
     pub(crate) material_demand: crate::material_demand::Mailbox,
     // Allocated only while sampled material words are being observed. A slot may be
@@ -606,9 +608,99 @@ pub(crate) struct TextureQueue {
     /// that will be brought up to date anyway.
     rechecks: std::collections::BTreeMap<u32, Recheck>,
     writes: u64,
+    /// (`QUEUE_MARKS`) What `slots` and `rechecks` hold, for reading without
+    /// the queue's lock (the host heap keeps the same; empty in tests made
+    /// without one).
+    marks: std::sync::Arc<QueueMarks>,
+}
+
+/// (`QUEUE_MARKS`; port of the idea of Op-lite/victory-scarlett c45b43e and
+/// bc264a41) Which title slots the texture queue holds, readable without its
+/// lock: per slot bit 0 if `slots` holds it, bit 1 if `rechecks` does.
+/// Changed only by the queue itself, under its lock ([`TextureQueue::sync`]);
+/// read without it by the places that would change nothing if they took the
+/// lock: a note that takes out a slot the queue does not hold, or keeps one
+/// it holds and the pass made (`seen`); a table read or a stale view that
+/// takes out a slot it does not hold. A mark read while the queue changes it
+/// says what the queue held just before or just after, as if the lock had
+/// been taken a moment earlier or later, which any of these threads may
+/// always do. Writes (not `seen`) always take the lock.
+#[derive(Default)]
+pub(crate) struct QueueMarks(Box<[std::sync::atomic::AtomicU8]>);
+
+const IN_SLOTS: u8 = 1;
+const IN_RECHECKS: u8 = 2;
+
+impl QueueMarks {
+    fn new(count: usize) -> Self {
+        QueueMarks((0..count).map(|_| std::sync::atomic::AtomicU8::new(0)).collect())
+    }
+
+    fn set(&self, index: u32, bits: u8) {
+        if let Some(mark) = self.0.get(index as usize) {
+            mark.store(bits, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// The bits of slot `index`; `None`: past the marks.
+    fn get(&self, index: u32) -> Option<u8> {
+        Some(self.0.get(index as usize)?.load(std::sync::atomic::Ordering::Acquire))
+    }
+}
+
+/// What the marks say of a slot: held by neither map, by `slots` (whatever
+/// `rechecks` holds), or only by `rechecks`; `None` where the lock has to be
+/// taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    Neither,
+    Slots,
+    OnlyRechecks,
+}
+
+fn held_of(bits: Option<u8>) -> Option<Held> {
+    match bits? {
+        0 => Some(Held::Neither),
+        b if b & IN_SLOTS != 0 => Some(Held::Slots),
+        _ => Some(Held::OnlyRechecks),
+    }
+}
+
+/// (`QUEUE_MARKS`) The lock not taken, by place: a slot's record, a table
+/// read.
+pub(crate) static QUEUE_SPARED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+fn spared(site: usize) {
+    QUEUE_SPARED[site].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// For the frame lines.
+#[allow(dead_code)]
+pub(crate) fn queue_marks_line(frames: f64) {
+    if !victory_core::switches::QUEUE_MARKS.is_on() {
+        return;
+    }
+    let f = frames.max(1.0);
+    let [a, b, c] = [0, 1, 2].map(|i| QUEUE_SPARED[i].swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / f);
+    tracing::info!(
+        "texture queue marks (QUEUE_MARKS) per frame: lock not taken for {a:.0} slot records, {b:.0} table reads, {c:.0} stale-view notes (nothing would have changed)"
+    );
 }
 
 impl TextureQueue {
+    /// An empty queue whose marks are `marks`.
+    fn with_marks(marks: std::sync::Arc<QueueMarks>) -> Self {
+        TextureQueue { marks, ..Default::default() }
+    }
+
+    /// Records what the queue holds of slot `index` in the marks (after any
+    /// change of `slots` or `rechecks`, under the queue's lock).
+    fn sync(&self, index: u32) {
+        let bits = u8::from(self.slots.contains_key(&index)) * IN_SLOTS
+            + u8::from(self.rechecks.contains_key(&index)) * IN_RECHECKS;
+        self.marks.set(index, bits);
+    }
+
     /// A texture view was written into slot `index` in `frame`, due from
     /// frame `due`. `seen`: it was not written, a draw or the pass made
     /// the host slot from a view the queue may hold already, which then
@@ -621,6 +713,7 @@ impl TextureQueue {
         let write = self.writes;
         self.rechecks.remove(&index);
         self.slots.insert(index, Waiting { due, table_grace_until: 0, written: frame, write, looks: 0, waiting_for_budget: false, ahead_ready: false, mapped: 0, recovered: false });
+        self.sync(index);
     }
 
     fn limit_table_grace(&mut self, index: u32, now_ms: u64) {
@@ -637,6 +730,7 @@ impl TextureQueue {
     fn remove(&mut self, index: u32) {
         self.slots.remove(&index);
         self.rechecks.remove(&index);
+        self.sync(index);
     }
 
     /// Slot `index` was uploaded whole in `frame` from memory `at`, whose
@@ -646,6 +740,7 @@ impl TextureQueue {
         if !self.slots.contains_key(&index) {
             let due = frame + RECHECK_FRAMES[0];
             self.rechecks.insert(index, Recheck { due, at, print, looks: 0, uploaded: frame });
+            self.sync(index);
         }
     }
 
@@ -682,6 +777,7 @@ impl TextureQueue {
             }
             None => {
                 self.rechecks.remove(&index);
+                self.sync(index);
             }
         }
     }
@@ -733,6 +829,7 @@ impl TextureQueue {
     fn done(&mut self, index: u32, write: u64) {
         if self.same(index, write).is_some() {
             self.slots.remove(&index);
+            self.sync(index);
         }
     }
 
@@ -777,6 +874,7 @@ impl TextureQueue {
         let table_grace_until = previous.map_or(0, |w| w.table_grace_until);
         self.rechecks.remove(&index);
         self.slots.insert(index, Waiting { due, table_grace_until, written: frame, write, looks: 0, waiting_for_budget: false, ahead_ready: false, mapped: 0, recovered });
+        self.sync(index);
     }
 
     /// Bytes of slot `index`'s memory that were mapped at its last upload
@@ -1111,6 +1209,7 @@ impl HostHeap {
                 Some((buffer, gpu, data as usize))
             })
             .flatten();
+        let marks = std::sync::Arc::new(QueueMarks::new(if sampler { 0 } else { count as usize }));
         let mut h = HostHeap {
             heap,
             null_views: None,
@@ -1132,7 +1231,8 @@ impl HostHeap {
             buffers: Mutex::default(),
             changed: Mutex::default(),
             buffer_pass: Mutex::default(),
-            textures: Mutex::default(),
+            textures: Mutex::new(TextureQueue::with_marks(marks.clone())),
+            marks,
             texture_sweep: Mutex::default(),
             material_demand: Default::default(),
             material_epochs: Default::default(),
@@ -1926,7 +2026,11 @@ impl HostHeap {
             return false;
         }
         self.unmake(&mut made, index);
-        self.textures.lock().unwrap_or_else(|e| e.into_inner()).rechecks.remove(&index);
+        {
+            let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
+            textures.rechecks.remove(&index);
+            textures.sync(index);
+        }
         STALE[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         true
     }
@@ -1960,6 +2064,30 @@ impl HostHeap {
         self.tabled_in(index, read, crate::frame::current());
     }
 
+    /// (`TABLED_ALL`) Title slot `index` is one of a table a draw binds,
+    /// whatever it holds (a buffer view, a constant buffer, nothing): the
+    /// pass over buffer views picked by index leaves it to its draws for as
+    /// long as it leaves a table's texture slots ([`TABLED_FRAMES`]); the
+    /// full look every 16 passes still finds it. Port of the idea of
+    /// KomanderDG88/VIniVIdiVIci 2dda6d9.
+    pub(crate) fn table_slot(&self, index: u32) {
+        if victory_core::switches::TABLED_ALL.is_on() {
+            self.tabled_in(index, false, crate::frame::current());
+        }
+    }
+
+    /// (`TABLED_ALL`) Takes the slots a table made lately out of `slots`
+    /// (the changed slots the pass is about to look at). Returns how many.
+    pub(crate) fn drop_tabled(&self, slots: &mut Vec<u32>) -> usize {
+        if !victory_core::switches::TABLED_ALL.is_on() {
+            return 0;
+        }
+        let frame = crate::frame::current();
+        let before = slots.len();
+        slots.retain(|&slot| !self.tabled_lately(slot, frame));
+        before - slots.len()
+    }
+
     /// [`HostHeap::texture_slot_tabled`] in frame `frame`.
     fn tabled_in(&self, index: u32, read: bool, frame: u64) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -1978,8 +2106,14 @@ impl HostHeap {
         if old != now | TABLED_READ {
             stamp.store(now | TABLED_READ, Relaxed);
             if tabled_out() {
+                // (`QUEUE_MARKS`) Not in `slots`: nothing to take out.
+                if matches!(self.held(index), Some(Held::Neither | Held::OnlyRechecks)) {
+                    spared(1);
+                    return;
+                }
                 let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
                 if textures.slots.remove(&index).is_some() {
+                    textures.sync(index);
                     TABLED_WRITES[1].fetch_add(1, Relaxed);
                 }
             }
@@ -2002,6 +2136,16 @@ impl HostHeap {
             .map_or(0, |s| s.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// (`QUEUE_MARKS`) What the queue holds of title slot `index`, read
+    /// without its lock; `None`: the lock has to be taken (switch off, or no
+    /// mark).
+    fn held(&self, index: u32) -> Option<Held> {
+        if !victory_core::switches::QUEUE_MARKS.is_on() {
+            return None;
+        }
+        held_of(self.marks.get(index))
+    }
+
     /// The queue's part of a write of title slot `index` in `frame`:
     /// `texture`, whether it now holds a view of a texture the title may
     /// fill; `seen` as for [`HostHeap::note_buffer`].
@@ -2020,8 +2164,19 @@ impl HostHeap {
         // Made now by a draw of this frame that read it through a table:
         // up to date.
         let read_now = seen && stamp == now | TABLED_READ;
+        let keeps = texture && !read_now;
+        // (`QUEUE_MARKS`) Nothing changes when a slot made (not written) is
+        // one `slots` holds (`TextureQueue::written` keeps it), or when the
+        // slot is to leave a queue that holds it nowhere.
+        match (keeps, seen, self.held(index)) {
+            (true, true, Some(Held::Slots)) | (false, _, Some(Held::Neither)) => {
+                spared(0);
+                return;
+            }
+            _ => {}
+        }
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
-        if texture && !read_now {
+        if keeps {
             let due = if lately && !seen {
                 TABLED_WRITES[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 frame + TABLED_GRACE
@@ -2110,9 +2265,15 @@ impl HostHeap {
         };
         if !stale.is_empty() {
             STALE[0].fetch_add(stale.len() as u64, std::sync::atomic::Ordering::Relaxed);
-            let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
-            for &slot in &stale {
-                textures.remove(slot);
+            // (`QUEUE_MARKS`) Only the ones the queue may hold.
+            let queued: Vec<u32> = stale.iter().copied().filter(|&slot| self.held(slot) != Some(Held::Neither)).collect();
+            if queued.is_empty() {
+                spared(2);
+            } else {
+                let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
+                for slot in queued {
+                    textures.remove(slot);
+                }
             }
         }
         let stride = view.and_then(view_stride);
@@ -4271,6 +4432,39 @@ mod tests {
 
         crate::shadow::unregister(2, other);
         crate::shadow::unregister(1, start);
+    }
+
+    /// (`QUEUE_MARKS`) The marks say what `slots` and `rechecks` hold after
+    /// every way the queue changes.
+    #[test]
+    fn the_texture_queue_marks_follow_slots_and_rechecks() {
+        let marks = std::sync::Arc::new(QueueMarks::new(8));
+        let mut q = TextureQueue::with_marks(marks);
+        let held = |q: &TextureQueue, i| held_of(q.marks.get(i));
+        assert_eq!(held(&q, 1), Some(Held::Neither));
+        q.written(1, 1, 0, false);
+        assert_eq!(held(&q, 1), Some(Held::Slots));
+        q.written(1, 2, 0, true);
+        assert_eq!(held(&q, 1), Some(Held::Slots));
+        let write = q.slots[&1].write;
+        q.done(1, write);
+        assert_eq!(held(&q, 1), Some(Held::Neither));
+        q.recheck(2, 5, (0x1000, 4096), 7);
+        assert_eq!(held(&q, 2), Some(Held::OnlyRechecks));
+        q.written(2, 6, 0, false);
+        assert_eq!(held(&q, 2), Some(Held::Slots));
+        q.remove(2);
+        assert_eq!(held(&q, 2), Some(Held::Neither));
+        q.changed(3, 1, 1);
+        assert_eq!(held(&q, 3), Some(Held::Slots));
+        q.remove(3);
+        assert_eq!(held(&q, 3), Some(Held::Neither));
+        assert_eq!(held(&q, 8), None);
+        assert_eq!(held_of(Some(IN_SLOTS | IN_RECHECKS)), Some(Held::Slots));
+        // A queue made without marks never says.
+        let mut plain = TextureQueue::default();
+        plain.written(4, 1, 0, false);
+        assert_eq!(held_of(plain.marks.get(4)), None);
     }
 
     #[test]

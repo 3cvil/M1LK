@@ -20,6 +20,10 @@
 //! | `RANGE_MEMO` | runtime | the memo is emptied at a flip (and already dropped each frame) |
 //! | `LOW_SHADOWS` | runtime | decided per draw; a skipped slice is only left cleared |
 //! | `WATCH_BATCH` | runtime | per-submission journal state only; a flip applies from the next run step and every asking is made by the same code either way |
+//! | `NOTHING_NEW_LOCKFREE` | runtime | `has_pending` mirrors the pending list under its lock; switching only picks which of two equal answers is read |
+//! | `TABLED_ALL` | runtime | only decides which changed buffer slots the next heap pass looks at; the 16-pass full look still covers the rest |
+//! | `QUEUE_MARKS` | runtime | the marks are kept up to date under the queue's lock either way; the switch only picks whether a note reads them first |
+//! | `JOURNAL_RWLOCK` | start-only | the write-watch journal's lock kind and the way copies read title memory are fixed at start |
 //! | `WATCH_SCAN` | start-only | changes how write-watch askings are laid out and journalled for the whole run |
 //! | `LOWCOMMIT_BACKOFF` | start-only | commit behaviour of uploads and staging is set up at start |
 //! | `INPLACE_CONSTANTS` | start-only | regions and buffer forms are placed once; a title buffer cannot change form |
@@ -115,6 +119,10 @@ pub static RANGE_MEMO: Switch = Switch::new("RANGE_MEMO", true, is_one);
 pub static LOW_SHADOWS: Switch = Switch::new("LOW_SHADOWS", true, not_off_word);
 // Start-only: listed so a plan naming them is refused with a reason. Their
 // modules still read their own variables once.
+pub static NOTHING_NEW_LOCKFREE: Switch = Switch::new("NOTHING_NEW_LOCKFREE", true, is_one);
+pub static TABLED_ALL: Switch = Switch::new("TABLED_ALL", true, is_one);
+pub static QUEUE_MARKS: Switch = Switch::new("QUEUE_MARKS", true, is_one);
+pub static JOURNAL_RWLOCK: Switch = Switch::new("JOURNAL_RWLOCK", false, is_one);
 pub static WATCH_BATCH: Switch = Switch::new("WATCH_BATCH", true, is_one);
 pub static WATCH_SCAN: Switch = Switch::new("WATCH_SCAN", false, is_one);
 pub static LOWCOMMIT_BACKOFF: Switch = Switch::new("LOWCOMMIT_BACKOFF", false, is_one);
@@ -122,7 +130,11 @@ pub static INPLACE_CONSTANTS: Switch = Switch::new("INPLACE_CONSTANTS", false, i
 pub static GPU_DETILE: Switch = Switch::new("GPU_DETILE", false, is_one);
 
 /// Every switch, runtime-safe and start-only.
-pub static ALL: [&Switch; 13] = [
+pub static ALL: [&Switch; 17] = [
+    &QUEUE_MARKS,
+    &NOTHING_NEW_LOCKFREE,
+    &TABLED_ALL,
+    &JOURNAL_RWLOCK,
     &COPY_PLAIN,
     &WATCH_BATCH,
     &SHORT_REMAP_LOCK,
@@ -389,7 +401,21 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), ALL.len());
         let start_only: Vec<&str> = ALL.iter().filter(|s| !s.runtime_safe).map(|s| s.name).collect();
-        assert_eq!(start_only, vec!["WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE"]);
+        assert_eq!(start_only, vec!["JOURNAL_RWLOCK", "WATCH_SCAN", "LOWCOMMIT_BACKOFF", "INPLACE_CONSTANTS", "GPU_DETILE"]);
+    }
+
+    #[test]
+    fn round_six_switches_are_registered_off_by_default_and_flagged() {
+        for (name, runtime) in [("NOTHING_NEW_LOCKFREE", true), ("TABLED_ALL", true), ("QUEUE_MARKS", true), ("JOURNAL_RWLOCK", false)] {
+            let s = find(name).expect("registered");
+            assert_eq!(s.runtime_safe, runtime, "{name}");
+            assert!(!(s.parse)(None), "{name} is off by default");
+            assert!((s.parse)(Some("1")), "{name}");
+        }
+        let (keep, refused) = parse_plan("NOTHING_NEW_LOCKFREE+TABLED_ALL+QUEUE_MARKS+JOURNAL_RWLOCK");
+        assert_eq!(keep.len(), 3);
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].1.starts_with("start-only"));
     }
 
     #[test]
