@@ -60,5 +60,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 31 | 2026-11-27 | yard-block check: exact wave64 split instead of the per-half approxim... | 4.3 | 4.1 | 16.7 | 148 | yard blocks | 40 | [chart](test-31.svg) |
 | 32 | 2026-11-27 | check: start from the cell autosave (pair runs share this start point... | 3.8 | 3.8 | 16.9 | 127 | unchecked | 42* | [chart](test-32.svg) |
 | 33 | 2026-11-27 | copy-plain + remap lock ON (its off pair was dropped; round 1 retests... | 3.8 | 4.3 | 16.1 | 138 | clean, faint smear | 45 | [chart](test-33.svg) |
+| 34 | 2026-11-27 | round 1 (combo a56b129): baseline A, every switch off | 4.4 | 4.5 | 17 | 156 | unchecked | 42* | [chart](test-34.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
