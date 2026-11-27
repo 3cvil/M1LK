@@ -57,6 +57,7 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 28 | 2026-11-27 | copy time breakdown (profiling run, no behavior change) | 4.4 | 4.3 | 16.9 | 136 | yard blocks | 41 | [chart](test-28.svg) |
 | 29 | 2026-11-27 | in-place host reads instead of a kernel call per copy (ported) | 4.5 | 3 | 17.2 | 149 | yard blocks | 38 | [chart](test-29.svg) |
 | 30 | 2026-11-27 | CGBJ low-commit back-off: defer texture uploads and cap look-ahead st... | 4.8 | 4.3 | 17.2 | 139 | yard blocks | 41 | [chart](test-30.svg) |
-| 31 | 2026-11-27 | yard-block check: exact wave64 split instead of the per-half approxim... | 4.3 | 4.1 | 16.7 | 148 | unchecked | 41* | [chart](test-31.svg) |
+| 31 | 2026-11-27 | yard-block check: exact wave64 split instead of the per-half approxim... | 4.3 | 4.1 | 16.7 | 148 | yard blocks | 40 | [chart](test-31.svg) |
+| 32 | 2026-11-27 | check: start from the cell autosave (pair runs share this start point... | 3.8 | 3.8 | 16.9 | 127 | unchecked | 42* | [chart](test-32.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
