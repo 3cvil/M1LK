@@ -20,6 +20,7 @@
 //! | `RANGE_MEMO` | runtime | the memo is emptied at a flip (and already dropped each frame) |
 //! | `LOW_SHADOWS` | runtime | decided per draw; a skipped slice is only left cleared |
 //! | `WATCH_BATCH` | runtime | per-submission journal state only; a flip applies from the next run step and every asking is made by the same code either way |
+//! | `AHEAD_INDEX` | runtime | the sorted index is only used when it is current, else the old walk answers; both give the same answer |
 //! | `NOTHING_NEW_LOCKFREE` | runtime | `has_pending` mirrors the pending list under its lock; switching only picks which of two equal answers is read |
 //! | `TABLED_ALL` | runtime | only decides which changed buffer slots the next heap pass looks at; the 16-pass full look still covers the rest |
 //! | `QUEUE_MARKS` | runtime | the marks are kept up to date under the queue's lock either way; the switch only picks whether a note reads them first |
@@ -124,13 +125,15 @@ pub static TABLED_ALL: Switch = Switch::new("TABLED_ALL", true, is_one);
 pub static QUEUE_MARKS: Switch = Switch::new("QUEUE_MARKS", true, is_one);
 pub static JOURNAL_RWLOCK: Switch = Switch::new("JOURNAL_RWLOCK", false, is_one);
 pub static WATCH_BATCH: Switch = Switch::new("WATCH_BATCH", true, is_one);
+pub static AHEAD_INDEX: Switch = Switch::new("AHEAD_INDEX", true, is_one);
 pub static WATCH_SCAN: Switch = Switch::new("WATCH_SCAN", false, is_one);
 pub static LOWCOMMIT_BACKOFF: Switch = Switch::new("LOWCOMMIT_BACKOFF", false, is_one);
 pub static INPLACE_CONSTANTS: Switch = Switch::new("INPLACE_CONSTANTS", false, is_one);
 pub static GPU_DETILE: Switch = Switch::new("GPU_DETILE", false, is_one);
 
 /// Every switch, runtime-safe and start-only.
-pub static ALL: [&Switch; 17] = [
+pub static ALL: [&Switch; 18] = [
+    &AHEAD_INDEX,
     &QUEUE_MARKS,
     &NOTHING_NEW_LOCKFREE,
     &TABLED_ALL,
@@ -392,6 +395,14 @@ mod tests {
         let (keep, refused) = parse_plan("WATCH_BATCH+COPY_PLAIN");
         assert!(refused.is_empty());
         assert_eq!(keep.len(), 2);
+    }
+
+    #[test]
+    fn ahead_index_is_runtime_safe_registered_and_off_by_default() {
+        assert!(AHEAD_INDEX.runtime_safe);
+        assert!(ALL.iter().any(|s| s.name == "AHEAD_INDEX"));
+        assert!(!(AHEAD_INDEX.parse)(None));
+        assert!((AHEAD_INDEX.parse)(Some("1")));
     }
 
     #[test]

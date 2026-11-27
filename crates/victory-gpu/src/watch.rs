@@ -51,7 +51,7 @@ struct Journal {
     /// Page ranges asked ahead for a submission's refreshes ([`ask_ahead`])
     /// and the asking that did: `writes` answers for a range inside one
     /// from the journal, without another kernel call.
-    ahead: Vec<(usize, usize)>,
+    ahead: AheadSet,
     ahead_asked: u64,
     /// The ahead asking stands for a whole submission ([`ask_once`]): no
     /// other ahead asking is made, and `ahead` stays, until
@@ -67,10 +67,117 @@ struct Journal {
     reasks: u32,
 }
 
+/// The ranges a submission's asking stands for. `covers` is the question
+/// every refresh asks of them (is `[first, last)` inside one?): with
+/// `AHEAD_INDEX` it is a binary search over the ranges sorted by start with
+/// the furthest end so far, not a walk over thousands of ranges for each of
+/// the frame's thousands of copies. The answer is the same either way; an
+/// index that is not built (ranges pushed since) is not used.
+struct AheadSet {
+    raw: Vec<(usize, usize)>,
+    sorted: Vec<(usize, usize)>,
+    /// `max_end[i]`: the largest end among `sorted[..=i]`.
+    max_end: Vec<usize>,
+}
+
+impl AheadSet {
+    const fn new() -> Self {
+        Self { raw: Vec::new(), sorted: Vec::new(), max_end: Vec::new() }
+    }
+
+    #[cfg(test)]
+    fn from_slice(ranges: &[(usize, usize)]) -> Self {
+        let mut s = Self { raw: ranges.to_vec(), ..Self::new() };
+        s.build();
+        s
+    }
+
+    fn push(&mut self, range: (usize, usize)) {
+        self.raw.push(range);
+    }
+
+    fn clear(&mut self) {
+        self.raw.clear();
+        self.sorted.clear();
+        self.max_end.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    /// After a run of pushes: builds the index (only with `AHEAD_INDEX`).
+    fn index(&mut self) {
+        if victory_core::switches::AHEAD_INDEX.is_on() && self.sorted.len() != self.raw.len() {
+            self.build();
+        }
+    }
+
+    fn build(&mut self) {
+        self.sorted.clear();
+        self.sorted.extend_from_slice(&self.raw);
+        self.sorted.sort_unstable();
+        self.max_end.clear();
+        let mut far = 0;
+        for &(_, b) in &self.sorted {
+            far = far.max(b);
+            self.max_end.push(far);
+        }
+    }
+
+    /// Whether one range holds `[first, last)`.
+    fn covers(&self, first: usize, last: usize) -> bool {
+        if victory_core::switches::AHEAD_INDEX.is_on() && !self.raw.is_empty() && self.sorted.len() == self.raw.len() {
+            return covers_sorted(&self.sorted, &self.max_end, first, last);
+        }
+        self.raw.iter().any(|&(a, b)| a <= first && last <= b)
+    }
+}
+
+/// `covers` over ranges sorted by start, with `max_end` their running
+/// largest end: some range starts at or before `first`, and the furthest
+/// end of those is at or past `last`.
+fn covers_sorted(sorted: &[(usize, usize)], max_end: &[usize], first: usize, last: usize) -> bool {
+    let n = sorted.partition_point(|&(a, _)| a <= first);
+    n > 0 && max_end[n - 1] >= last
+}
+
+#[cfg(test)]
+mod ahead_tests {
+    use super::{AheadSet, covers_sorted};
+
+    #[test]
+    fn the_index_answers_as_the_walk_does() {
+        // Unsorted, overlapping, nested, empty and touching ranges.
+        let ranges = [(40, 50), (0, 10), (5, 30), (8, 9), (30, 31), (100, 100), (60, 90), (62, 64)];
+        let set = AheadSet::from_slice(&ranges);
+        for first in 0..110 {
+            for last in 0..115 {
+                let walk = ranges.iter().any(|&(a, b)| a <= first && last <= b);
+                assert_eq!(covers_sorted(&set.sorted, &set.max_end, first, last), walk, "{first}..{last}");
+            }
+        }
+    }
+
+    #[test]
+    fn pushes_since_the_build_fall_back_to_the_walk() {
+        let mut set = AheadSet::from_slice(&[(0, 10)]);
+        set.push((20, 30));
+        assert!(set.sorted.len() != set.raw.len());
+        assert!(set.covers(21, 29));
+        set.clear();
+        assert!(!set.covers(1, 2) && set.is_empty() && set.len() == 0);
+    }
+}
+
 const EMPTY_JOURNAL: Journal = Journal {
     written: BTreeMap::new(),
     found: Vec::new(),
-    ahead: Vec::new(),
+    ahead: AheadSet::new(),
     ahead_asked: 0,
     kept: false,
     pieces: Vec::new(),
@@ -150,6 +257,7 @@ pub(crate) fn ask_ahead(ranges: impl Iterator<Item = (usize, usize)>) {
     if pieces.len() >= 2 {
         let gap = if scan() { ahead_gap() } else { AHEAD_GAP };
         ask_groups(&mut j, &pieces, gap);
+        j.ahead.index();
     }
 }
 
@@ -272,10 +380,11 @@ fn ask_pieces(j: &mut Journal, pieces: Vec<(usize, usize)>) {
     // askings a frame with the switch on, as without it). They are asked
     // here, once; what is not write-watched stays with `writes`.
     for (first, last) in pieces {
-        if !j.ahead.iter().any(|&(a, b)| a <= first && last <= b) && ask_kernel(j, first, last) {
+        if !j.ahead.covers(first, last) && ask_kernel(j, first, last) {
             j.ahead.push((first, last));
         }
     }
+    j.ahead.index();
     j.kept = !j.ahead.is_empty();
 }
 
@@ -462,7 +571,7 @@ pub(crate) fn nothing_new(start: usize, end: usize, base: usize, copied: &[u64])
 /// [`nothing_new`] of pages `[first, last)`, `taken[i]` the asking after
 /// which page `first + i` was copied.
 fn quiet(j: &Journal, first: usize, last: usize, taken: &[u64]) -> bool {
-    j.ahead.iter().any(|&(a, b)| a <= first && last <= b)
+    j.ahead.covers(first, last)
         && taken.iter().all(|&at| at != 0)
         && j.written.range(first..last).all(|(&page, &write)| write <= taken[page - first])
 }
@@ -472,7 +581,7 @@ mod quiet_tests {
     use super::{Journal, MAX_REASKS, quiet, reask_due};
 
     fn journal(ahead: &[(usize, usize)], written: &[(usize, u64)]) -> Journal {
-        Journal { ahead: ahead.to_vec(), written: written.iter().copied().collect(), ..super::EMPTY_JOURNAL }
+        Journal { ahead: AheadSet::from_slice(ahead), written: written.iter().copied().collect(), ..super::EMPTY_JOURNAL }
     }
 
     #[test]
@@ -520,7 +629,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     lock.end(crate::copyprof::Slot::JournalLock, 0);
     let j = &mut *j;
     // Asked ahead with the submission's other ranges: the journal has it.
-    if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+    if j.ahead.covers(first, last) {
         return Some((
             j.ahead_asked,
             j.written
@@ -580,6 +689,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     // never less).
     if kernel && !j.ahead.is_empty() && j.ahead.len() < AHEAD_RANGES && scan() {
         j.ahead.push((first, last));
+        j.ahead.index();
     }
     Some((
         now,
@@ -611,7 +721,7 @@ fn writes_shared(start: usize, end: usize, guarded: bool) -> Option<(u64, Vec<(u
         let j = JOURNAL.read().unwrap_or_else(|e| e.into_inner());
         lock.end(crate::copyprof::Slot::JournalLock, 0);
         // Asked ahead with the submission's other ranges: the journal has it.
-        if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+        if j.ahead.covers(first, last) {
             return Some((j.ahead_asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()));
         }
     }
@@ -683,6 +793,7 @@ fn writes_shared(start: usize, end: usize, guarded: bool) -> Option<(u64, Vec<(u
     // copies of these pages answer from the journal.
     if kernel && !j.ahead.is_empty() && j.ahead.len() < AHEAD_RANGES && scan() {
         j.ahead.push((first, last));
+        j.ahead.index();
     }
     Some((now, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()))
 }
@@ -1558,7 +1669,7 @@ pub(crate) mod tests {
         write(30);
         let mut wide = EMPTY_JOURNAL;
         ask_groups(&mut wide, &pieces, SCAN_GAP);
-        assert_eq!(wide.ahead, [(base, base + 31)]);
+        assert_eq!(wide.ahead.raw, [(base, base + 31)]);
         let now = wide.ahead_asked;
         assert_eq!(wide.written, BTreeMap::from([(base, now), (base + 10, now), (base + 30, now)]));
         // The kernel's bits were reset; the journal still holds them.
