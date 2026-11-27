@@ -49,6 +49,10 @@ taken from the [test log](#test-log) below.
 
 ## Test log
 
+Charts for every test (fps, frame-time split, draws, RAM, GPU clock) and an overall weighted score per test are in [docs/tests](docs/tests/README.md).
+
+![Overall score per test](docs/tests/score.svg)
+
 Every test run is logged here automatically, with its settings and a picture check.
 
 <details>
