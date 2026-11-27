@@ -7202,7 +7202,7 @@ impl HostList {
                     // It wrote title memory, where is not known here: the
                     // submission's one asking ends, later refreshes ask anew.
                     if matches!(step, Step::Run(_)) {
-                        crate::watch::ask_once_end();
+                        crate::watch::ask_once_run();
                     }
                     #[cfg(feature = "diagnostics")]
                     {
@@ -7600,7 +7600,19 @@ impl Batch {
         self.index.clear();
         // One write-watch asking for the copies that lie close together,
         // not one per copy.
-        let ahead = self.refreshes.len() > 1;
+        // `WATCH_BATCH`: after a run step, one asking for all the submission's
+        // copies stands in for the asking each flush would make.
+        let reasked = !self.refreshes.is_empty() && {
+            let started = std::time::Instant::now();
+            let prof = crate::copyprof::start();
+            let done = crate::watch::reask();
+            if done {
+                prof.end(crate::copyprof::Slot::AskAhead, 0);
+                PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            }
+            done
+        };
+        let ahead = !reasked && self.refreshes.len() > 1;
         if ahead {
             let started = std::time::Instant::now();
             let prof = crate::copyprof::start();

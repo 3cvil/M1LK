@@ -19,6 +19,7 @@
 //! | `LOOKUP_CACHE` | runtime | the tables' change count is bumped at a flip, so no thread keeps an old answer |
 //! | `RANGE_MEMO` | runtime | the memo is emptied at a flip (and already dropped each frame) |
 //! | `LOW_SHADOWS` | runtime | decided per draw; a skipped slice is only left cleared |
+//! | `WATCH_BATCH` | runtime | per-submission journal state only; a flip applies from the next run step and every asking is made by the same code either way |
 //! | `WATCH_SCAN` | start-only | changes how write-watch askings are laid out and journalled for the whole run |
 //! | `LOWCOMMIT_BACKOFF` | start-only | commit behaviour of uploads and staging is set up at start |
 //! | `INPLACE_CONSTANTS` | start-only | regions and buffer forms are placed once; a title buffer cannot change form |
@@ -114,14 +115,16 @@ pub static RANGE_MEMO: Switch = Switch::new("RANGE_MEMO", true, is_one);
 pub static LOW_SHADOWS: Switch = Switch::new("LOW_SHADOWS", true, not_off_word);
 // Start-only: listed so a plan naming them is refused with a reason. Their
 // modules still read their own variables once.
+pub static WATCH_BATCH: Switch = Switch::new("WATCH_BATCH", true, is_one);
 pub static WATCH_SCAN: Switch = Switch::new("WATCH_SCAN", false, is_one);
 pub static LOWCOMMIT_BACKOFF: Switch = Switch::new("LOWCOMMIT_BACKOFF", false, is_one);
 pub static INPLACE_CONSTANTS: Switch = Switch::new("INPLACE_CONSTANTS", false, is_one);
 pub static GPU_DETILE: Switch = Switch::new("GPU_DETILE", false, is_one);
 
 /// Every switch, runtime-safe and start-only.
-pub static ALL: [&Switch; 12] = [
+pub static ALL: [&Switch; 13] = [
     &COPY_PLAIN,
+    &WATCH_BATCH,
     &SHORT_REMAP_LOCK,
     &WIDE_REFRESH,
     &PARALLEL_REFRESH,
@@ -366,6 +369,17 @@ mod tests {
         let bad: Vec<&str> = refused.iter().map(|(w, _)| w.as_str()).collect();
         assert_eq!(bad, vec!["WATCH_SCAN", "GPU_DETILE", "NOPE", "LOOKUP_CACHE"]);
         assert!(refused[0].1.starts_with("start-only"));
+    }
+
+    #[test]
+    fn watch_batch_is_runtime_safe_registered_and_off_by_default() {
+        assert!(WATCH_BATCH.runtime_safe);
+        assert!(ALL.iter().any(|s| s.name == "WATCH_BATCH"));
+        assert!(!(WATCH_BATCH.parse)(None));
+        assert!((WATCH_BATCH.parse)(Some("1")));
+        let (keep, refused) = parse_plan("WATCH_BATCH+COPY_PLAIN");
+        assert!(refused.is_empty());
+        assert_eq!(keep.len(), 2);
     }
 
     #[test]

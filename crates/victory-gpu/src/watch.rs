@@ -50,6 +50,14 @@ struct Journal {
     /// other ahead asking is made, and `ahead` stays, until
     /// [`ask_once_end`].
     kept: bool,
+    /// With `WATCH_BATCH`: the pieces of the submission's one asking, kept
+    /// so that a run step (which writes title memory somewhere) is followed
+    /// by one asking for all of them, not one per flush.
+    pieces: Vec<(usize, usize)>,
+    /// A run step ended the standing asking; the next flush asks again.
+    stale: bool,
+    /// Askings of everything made after run steps in this submission.
+    reasks: u32,
 }
 
 const EMPTY_JOURNAL: Journal = Journal {
@@ -59,6 +67,9 @@ const EMPTY_JOURNAL: Journal = Journal {
     ahead: Vec::new(),
     ahead_asked: 0,
     kept: false,
+    pieces: Vec::new(),
+    stale: false,
+    reasks: 0,
 };
 static JOURNAL: Mutex<Journal> = Mutex::new(EMPTY_JOURNAL);
 
@@ -236,6 +247,18 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
     pieces.dedup();
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
     let j = &mut *j;
+    j.pieces.clear();
+    j.stale = false;
+    j.reasks = 0;
+    if victory_core::switches::WATCH_BATCH.is_on() {
+        j.pieces.extend_from_slice(&pieces);
+    }
+    ask_pieces(j, pieces);
+}
+
+/// One asking for `pieces`, which then stands until [`ask_once_end`] (or a
+/// run step, [`ask_once_run`]).
+fn ask_pieces(j: &mut Journal, pieces: Vec<(usize, usize)>) {
     let gap = if scan() { ahead_gap() } else { AHEAD_GAP };
     ask_groups(j, &pieces, gap);
     // `ask_groups` leaves a range that lies alone to `writes`, which asks
@@ -255,10 +278,61 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
 /// or title memory was written in a way the journal was not told.
 pub(crate) fn ask_once_end() {
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    j.pieces.clear();
+    j.stale = false;
     if j.kept {
         j.kept = false;
         j.ahead.clear();
     }
+}
+
+/// The most askings of everything one submission makes after run steps;
+/// beyond it the flushes ask per range again, as without `WATCH_BATCH`.
+const MAX_REASKS: u32 = 8;
+
+/// Whether a flush asks for everything again: a run step ended the asking,
+/// the pieces are known, and the limit is not reached.
+fn reask_due(batch: bool, stale: bool, have_pieces: bool, reasks: u32) -> bool {
+    batch && stale && have_pieces && reasks < MAX_REASKS
+}
+
+/// A run step wrote title memory, where is not known. Without `WATCH_BATCH`
+/// that ends the submission's asking ([`ask_once_end`]). With it the asking
+/// is only marked stale: the kernel still counts the run's writes, and the
+/// next flush asks for all the submission's pieces at once ([`reask`])
+/// instead of every flush asking for its own.
+pub(crate) fn ask_once_run() {
+    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    if victory_core::switches::WATCH_BATCH.is_on() && j.kept && !j.pieces.is_empty() {
+        j.kept = false;
+        j.stale = true;
+        j.ahead.clear();
+        return;
+    }
+    if !j.stale {
+        j.pieces.clear();
+    }
+    if j.kept {
+        j.kept = false;
+        j.ahead.clear();
+    }
+}
+
+/// With `WATCH_BATCH`, after a run step: asks the kernel about all the
+/// submission's pieces again (once, see [`MAX_REASKS`]); true if it did, and
+/// the asking then stands as the first did.
+pub(crate) fn reask() -> bool {
+    let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+    let batch = victory_core::switches::WATCH_BATCH.is_on();
+    let due = reask_due(batch, j.stale, !j.pieces.is_empty(), j.reasks);
+    if !due {
+        return false;
+    }
+    j.stale = false;
+    j.reasks += 1;
+    let pieces = j.pieces.clone();
+    ask_pieces(&mut j, pieces);
+    true
 }
 
 /// We wrote title memory `[at, at + len)` while a submission's one asking
@@ -395,6 +469,16 @@ mod quiet_tests {
 
     fn journal(ahead: &[(usize, usize)], written: &[(usize, u64)]) -> Journal {
         Journal { ahead: ahead.to_vec(), written: written.iter().copied().collect(), ..super::EMPTY_JOURNAL }
+    }
+
+    #[test]
+    fn a_reask_is_due_only_when_batching_stale_known_and_under_the_limit() {
+        assert!(reask_due(true, true, true, 0));
+        assert!(reask_due(true, true, true, MAX_REASKS - 1));
+        assert!(!reask_due(true, true, true, MAX_REASKS));
+        assert!(!reask_due(false, true, true, 0));
+        assert!(!reask_due(true, false, true, 0));
+        assert!(!reask_due(true, true, false, 0));
     }
 
     #[test]
