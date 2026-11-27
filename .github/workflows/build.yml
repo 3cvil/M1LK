@@ -1,0 +1,71 @@
+name: Build
+
+# A diagnostics build (`--profile diag --features diagnostics`) of a test branch, handed back as an artifact so a
+# test machine can run it without compiling. Runs on a push to test/** or by hand. The runner has no graphics card:
+# this builds, it does not run anything.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['test/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  diag:
+    name: diag build
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      # actions/checkout v5.0.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Prepare verified BCPack format tables
+        shell: pwsh
+        run: ./Initialize-FormatTables.ps1
+      # The version and components pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
+      # Swatinem/rust-cache v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: diag
+      - name: Build
+        run: cargo build --profile diag -p victory --features diagnostics --locked
+      - name: Check and collect the binaries
+        id: collect
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $diag = 'target/diag'
+          $exes = @('m1lk.exe', 'm1lk-play.exe', 'm1lk-warm.exe')
+          $out = New-Item -ItemType Directory -Force 'artifact'
+          foreach ($exe in $exes) {
+            $path = Join-Path $diag $exe
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing $path" }
+            Copy-Item -LiteralPath $path -Destination $out
+          }
+          # A build without the diagnostics feature has no scripted keys and is useless for a test run.
+          $text = [IO.File]::ReadAllText((Join-Path $diag 'm1lk.exe'), [Text.Encoding]::ASCII)
+          if (-not $text.Contains('VICTORY_KEYS')) { throw 'm1lk.exe was built without the diagnostics feature' }
+          Get-ChildItem $out | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName).Hash, $_.Name } |
+            Set-Content (Join-Path $out 'SHA256SUMS.txt')
+          "$env:GITHUB_SHA" | Set-Content (Join-Path $out 'COMMIT.txt')
+          $name = 'diag-' + ($env:REF_NAME -replace '[^A-Za-z0-9._-]', '-')
+          "name=$name" >> $env:GITHUB_OUTPUT
+      # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.collect.outputs.name }}
+          path: artifact/
+          retention-days: 14
+          if-no-files-found: error

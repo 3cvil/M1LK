@@ -309,7 +309,7 @@ pub(crate) fn target_format(format: u32) -> u32 {
                 chosen
             })
         });
-        return chosen[i];
+        chosen[i]
     }
     #[cfg(not(windows))]
     format

@@ -215,21 +215,6 @@ pub(crate) fn line(frames: f64) {
     tracing::info!("submit profile ms/frame:{text}");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_stage_and_count_has_a_name() {
-        assert_eq!(NAMES.len(), STAGES);
-        assert_eq!(COUNT_NAMES.len(), COUNTS);
-        let mut all: Vec<&str> = NAMES.iter().chain(COUNT_NAMES.iter()).copied().collect();
-        all.sort_unstable();
-        all.dedup();
-        assert_eq!(all.len(), STAGES + COUNTS, "names are unique");
-    }
-}
-
 /// Adds the time from its making to its drop to a stage.
 pub(crate) struct Scope(S, Option<Instant>);
 
@@ -245,5 +230,20 @@ impl Drop for Scope {
         if let Some(since) = self.1 {
             lap(self.0, since);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_stage_and_count_has_a_name() {
+        assert_eq!(NAMES.len(), STAGES);
+        assert_eq!(COUNT_NAMES.len(), COUNTS);
+        let mut all: Vec<&str> = NAMES.iter().chain(COUNT_NAMES.iter()).copied().collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), STAGES + COUNTS, "names are unique");
     }
 }

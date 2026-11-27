@@ -112,10 +112,18 @@ fn launcher_options(
     Ok(options)
 }
 
+/// The runtime sits beside the launcher under the launcher's own name without its `-play` or `-warm` ending, so a
+/// folder of renamed binaries (`victory-play.exe` next to `victory.exe`) still starts its own runtime.
+fn runtime_name(launcher: &Path) -> String {
+    let stem = launcher.file_stem().and_then(|stem| stem.to_str()).unwrap_or("m1lk");
+    let base = stem.strip_suffix("-play").or_else(|| stem.strip_suffix("-warm")).unwrap_or("m1lk");
+    format!("{base}.exe")
+}
+
 pub(super) fn run(warm: bool) -> anyhow::Result<()> {
     let launcher = std::env::current_exe()?;
     let folder = launcher.parent().context("Launcher folder is missing")?;
-    let runtime = folder.join("m1lk.exe");
+    let runtime = folder.join(runtime_name(&launcher));
     let mut args = std::env::args_os().skip(1).peekable();
     let LaunchOptions {
         warp, ray_tracing, static_bvh, console, local_gpu_memory, native_1440p, render_1080p, fsr,
@@ -377,7 +385,16 @@ pub(super) fn show_error(text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_warm_summary, launcher_options};
+    use super::{check_warm_summary, launcher_options, runtime_name};
+    use std::path::Path;
+
+    #[test]
+    fn runtime_follows_the_launcher_name() {
+        assert_eq!(runtime_name(Path::new("x/m1lk-play.exe")), "m1lk.exe");
+        assert_eq!(runtime_name(Path::new("x/m1lk-warm.exe")), "m1lk.exe");
+        assert_eq!(runtime_name(Path::new("x/victory-play.exe")), "victory.exe");
+        assert_eq!(runtime_name(Path::new("x/other.exe")), "m1lk.exe");
+    }
 
     #[test]
     fn explicit_off_wins_in_either_order_and_keeps_the_game_path() {

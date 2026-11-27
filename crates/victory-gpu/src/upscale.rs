@@ -271,23 +271,6 @@ impl Upscaler for Spatial {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typeless_gets_a_typed_view() {
-        assert_eq!(typed(DXGI_FORMAT_R16G16B16A16_TYPELESS), Some(DXGI_FORMAT_R16G16B16A16_FLOAT));
-        assert_eq!(typed(DXGI_FORMAT_R11G11B10_FLOAT), Some(DXGI_FORMAT_R11G11B10_FLOAT));
-        assert_eq!(typed(DXGI_FORMAT_R24G8_TYPELESS), None);
-    }
-
-    #[test]
-    fn spatial_shader_compiles() {
-        crate::host::compile(SPATIAL, s!("main"), s!("cs_5_1")).unwrap();
-    }
-}
-
 impl Upscaler for crate::dlss::DlssBackend {
     fn name(&self) -> &'static str {
         crate::dlss::DlssBackend::name(self)
@@ -317,5 +300,22 @@ impl Upscaler for crate::dlss::DlssBackend {
 
     fn release(&mut self) {
         crate::dlss::DlssBackend::release(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typeless_gets_a_typed_view() {
+        assert_eq!(typed(DXGI_FORMAT_R16G16B16A16_TYPELESS), Some(DXGI_FORMAT_R16G16B16A16_FLOAT));
+        assert_eq!(typed(DXGI_FORMAT_R11G11B10_FLOAT), Some(DXGI_FORMAT_R11G11B10_FLOAT));
+        assert_eq!(typed(DXGI_FORMAT_R24G8_TYPELESS), None);
+    }
+
+    #[test]
+    fn spatial_shader_compiles() {
+        crate::host::compile(SPATIAL, s!("main"), s!("cs_5_1")).unwrap();
     }
 }

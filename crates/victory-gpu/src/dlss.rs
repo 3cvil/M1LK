@@ -182,6 +182,8 @@ fn load_library(path: &Path) -> Option<windows_sys::Win32::Foundation::HMODULE> 
 }
 
 /// Resolves the D3D12 entry points in `module`; `None` if any is missing.
+// Each `get!` takes its target type from the `ngx::Api` field it fills, so a turbofish would repeat every signature.
+#[allow(clippy::missing_transmute_annotations)]
 fn resolve(module: windows_sys::Win32::Foundation::HMODULE) -> Option<ngx::Api> {
     use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
     macro_rules! get {
@@ -229,7 +231,7 @@ fn core_candidates(dll_dir: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
     out.extend(found.into_iter().map(|f| f.1));
     out.push(dll_dir.join("nvngx_dlss.dll"));
     out

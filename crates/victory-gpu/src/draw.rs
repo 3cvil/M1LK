@@ -2136,7 +2136,7 @@ impl State {
                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
                 // Of the mips the view shows: what lies behind them is
                 // another texture's.
-                let len = crate::resource::placed_bytes_from(&resource, crate::resource::first_mip(desc)).unwrap_or(1);
+                let len = crate::resource::placed_bytes_from(resource, crate::resource::first_mip(desc)).unwrap_or(1);
                 let mapped = crate::texture::mapped_bytes(address as *const u8, len as usize);
                 if recovered && !host.material_upload_allowed(index, write, address, len, mapped) {
                     host.texture_slot_done(index, write, None);
@@ -4243,6 +4243,16 @@ pub(crate) fn depth_bounds(list: &HostList, min: f32, max: f32) {
     }
 }
 
+/// How many passes the heap's buffer views are looked at again over
+/// (`VICTORY_HEAP_RESCAN_SLICES`, default 16; 1: all at every 16th pass,
+/// as before).
+fn heap_rescan_slices() -> u64 {
+    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("VICTORY_HEAP_RESCAN_SLICES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(16).clamp(1, 1024)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4644,14 +4654,4 @@ mod tests {
         state.set_table(true, 2, 0);
         assert_eq!(state.host_word(true, USER_VIEW_RECORDS, 2, 8, None), 0);
     }
-}
-
-/// How many passes the heap's buffer views are looked at again over
-/// (`VICTORY_HEAP_RESCAN_SLICES`, default 16; 1: all at every 16th pass,
-/// as before).
-fn heap_rescan_slices() -> u64 {
-    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *N.get_or_init(|| {
-        std::env::var("VICTORY_HEAP_RESCAN_SLICES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(16).clamp(1, 1024)
-    })
 }
