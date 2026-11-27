@@ -24,7 +24,7 @@
 //! | `INPLACE_CONSTANTS` | start-only | regions and buffer forms are placed once; a title buffer cannot change form |
 //! | `GPU_DETILE` | start-only | textures kept detiled on the card or the PC stay so; the shader is made at start |
 //!
-//! The schedule (`M1LK_TOGGLE_PLAN`, see [`parse_plan`] and [`schedule`])
+//! The schedule (`M1LK_TOGGLE_PLAN`, names joined by `,` or `+` (the test queue splits its env list on commas); see [`parse_plan`] and [`schedule`])
 //! names runtime-safe switches only. [`on_frame`] is called once a frame by
 //! the present path, so a flip is always between two frames.
 
@@ -147,7 +147,7 @@ pub fn find(name: &str) -> Option<&'static Switch> {
 pub fn parse_plan(text: &str) -> (Vec<&'static Switch>, Vec<(String, &'static str)>) {
     let mut keep: Vec<&'static Switch> = Vec::new();
     let mut refused = Vec::new();
-    for word in text.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+    for word in text.split([',', '+', '|']).map(str::trim).filter(|w| !w.is_empty()) {
         match find(word) {
             None => refused.push((word.to_string(), "not a switch")),
             Some(s) if !s.runtime_safe => refused.push((word.to_string(), "start-only: it cannot change while the title runs")),
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn start_only_switches_and_strangers_are_refused() {
-        let (keep, refused) = parse_plan("LOOKUP_CACHE, m1lk_range_memo ,WATCH_SCAN,GPU_DETILE,NOPE,LOOKUP_CACHE,,LOW_SHADOWS");
+        let (keep, refused) = parse_plan("LOOKUP_CACHE, m1lk_range_memo +WATCH_SCAN|GPU_DETILE,NOPE,LOOKUP_CACHE,,LOW_SHADOWS");
         let names: Vec<&str> = keep.iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["LOOKUP_CACHE", "RANGE_MEMO", "LOW_SHADOWS"]);
         let bad: Vec<&str> = refused.iter().map(|(w, _)| w.as_str()).collect();

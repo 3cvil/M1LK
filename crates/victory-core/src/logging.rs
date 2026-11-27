@@ -51,7 +51,6 @@ where
         mut writer: tracing_subscriber::fmt::format::Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
-        use std::fmt::Write;
         if !crate::switches::plan_active() {
             return self.0.format_event(ctx, writer, event);
         }
