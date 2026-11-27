@@ -1287,7 +1287,7 @@ fn translated_compute_matches_pc() {
 }
 
 #[test]
-#[ignore = "requires VICTORY_SHALLOW_WATER_SHADER and a hardware D3D12 device"]
+#[ignore = "requires M1LK_SHALLOW_WATER_SHADER and a hardware D3D12 device"]
 fn shallow_water_reduces_four_independent_tiles_on_the_gpu() {
     use super::host::{Dispatch, Root, Stride, View};
     let path = std::env::var_os("VICTORY_SHALLOW_WATER_SHADER").expect("original shader path");

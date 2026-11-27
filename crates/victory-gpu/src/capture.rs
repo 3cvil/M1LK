@@ -191,7 +191,7 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
         let before = heavy.first;
         heavy_frame(frame, attempts, &mut heavy, offsets);
         if before.is_none() && heavy.first.is_some() {
-            tracing::info!(frame, attempts, "the heavy scene's first frame (VICTORY_CAPTURE_HEAVY_FRAMES counts from it)");
+            tracing::info!(frame, attempts, "the heavy scene's first frame (M1LK_CAPTURE_HEAVY_FRAMES counts from it)");
         }
     }
     let before = LAST.swap(drawn, Relaxed);

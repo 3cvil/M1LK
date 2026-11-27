@@ -69,7 +69,7 @@ fn chosen_backend() -> Box<dyn Upscaler> {
     if chosen() == "dlss" {
         match crate::dlss::DlssBackend::from_env() {
             Some(dlss) => return Box::new(dlss),
-            None => tracing::warn!("VICTORY_UPSCALER=dlss without VICTORY_DLSS=quality|balanced|performance|ultra; spatial instead"),
+            None => tracing::warn!("M1LK_UPSCALER=dlss without M1LK_DLSS=quality|balanced|performance|ultra; spatial instead"),
         }
     }
     Box::new(Spatial::default())

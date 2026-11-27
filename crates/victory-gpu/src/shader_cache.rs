@@ -49,7 +49,7 @@ fn build() -> &'static [u8; 32] {
         if limit != victory_shader::emit::DEFAULT_LOOP_LIMIT {
             tracing::warn!(
                 limit,
-                "VICTORY_SHADER_LOOP_LIMIT: translated loops stop sooner"
+                "M1LK_SHADER_LOOP_LIMIT: translated loops stop sooner"
             );
         }
         // The view heap's null slot is part of the translation (it differs

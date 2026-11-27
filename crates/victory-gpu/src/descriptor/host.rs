@@ -983,7 +983,7 @@ fn dynamic_slots(null: u32) -> u32 {
             tracing::warn!(
                 slots,
                 title_in_place = null.saturating_sub(slots),
-                "dynamic descriptor slots on a capped view heap (VICTORY_DYNAMIC_SLOTS)"
+                "dynamic descriptor slots on a capped view heap (M1LK_DYNAMIC_SLOTS)"
             );
         }
         slots
@@ -1063,7 +1063,7 @@ impl HostHeap {
                         tracing::warn!(
                             title,
                             in_use = TITLE_SLOTS_IN_USE,
-                            "fewer title view slots kept than seen in use: views past them read a null slot (VICTORY_DYNAMIC_SLOTS too high?)"
+                            "fewer title view slots kept than seen in use: views past them read a null slot (M1LK_DYNAMIC_SLOTS too high?)"
                         );
                     }
                 }

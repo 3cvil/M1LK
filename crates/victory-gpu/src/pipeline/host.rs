@@ -1274,7 +1274,7 @@ mod tests {
         if host.is_software()
             && std::env::var("VICTORY_TESTS_ALLOW_SOFTWARE_SKIP").is_ok_and(|v| v == "1")
         {
-            eprintln!("the software adapter does not apply depth bounds; skipped (VICTORY_TESTS_ALLOW_SOFTWARE_SKIP=1)");
+            eprintln!("the software adapter does not apply depth bounds; skipped (M1LK_TESTS_ALLOW_SOFTWARE_SKIP=1)");
             return;
         }
         let Some(dxc) = dxc() else {

@@ -453,7 +453,7 @@ fn pages_per_section() -> usize {
         if mb == 0 || on_wine() {
             usize::MAX
         } else {
-            tracing::info!(mb, "physical allocations split into smaller sections (VICTORY_SECTION_MB)");
+            tracing::info!(mb, "physical allocations split into smaller sections (M1LK_SECTION_MB)");
             ((mb << 20) / PAGE).max(1)
         }
     })

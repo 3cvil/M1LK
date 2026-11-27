@@ -35,7 +35,7 @@ fn on() -> bool {
         let on = std::env::var_os("VICTORY_SKIP_WC_BACK").is_some_and(|v| v == "1");
         if on {
             tracing::warn!(
-                "ARMED: VICTORY_SKIP_WC_BACK=1 - shader writes to write-combining title memory are NOT copied back (experiment)"
+                "ARMED: M1LK_SKIP_WC_BACK=1 - shader writes to write-combining title memory are NOT copied back (experiment)"
             );
         }
         on
@@ -90,7 +90,7 @@ pub(crate) fn skip_back(declared: (usize, usize), bytes: u64) -> bool {
         let b = SKIPPED[1].fetch_add(bytes, Ordering::Relaxed) + bytes;
         if n.is_power_of_two() {
             tracing::info!(
-                "VICTORY_SKIP_WC_BACK: {n} pieces ({} MB) of write-combining memory left on the card so far",
+                "M1LK_SKIP_WC_BACK: {n} pieces ({} MB) of write-combining memory left on the card so far",
                 b >> 20
             );
         }

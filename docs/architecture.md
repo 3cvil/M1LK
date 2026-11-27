@@ -64,13 +64,13 @@ nothing imports it. By name, as by import, a title gets only host DLLs
 override where import binding would.
 `QueryApiImpl` hands out our runtime objects by provider and interface id
 (`victory-hle::modules::xgameruntime` lists the areas); online areas answer
-as an offline console. Game saves are files under `VICTORY_DATA_DIR`.
+as an offline console. Game saves are files under `M1LK_DATA_DIR`.
 
 Title storage is a drive on the console, and titles build paths on that.
 `victory-hle::modules::files` binds every path-taking title import
 (kernel32 and the C/C++ runtime) and rewrites paths on a virtual drive to
 the host folder behind it; persistent local storage is one such drive over
-a folder under `VICTORY_DATA_DIR`. Other paths reach the host unchanged.
+a folder under `M1LK_DATA_DIR`. Other paths reach the host unchanged.
 
 An exe's code reaches its static TLS as slot 0; mapped as a DLL it gets
 another slot, so the loader redirects those loads (`victory-loader::tls`).

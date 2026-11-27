@@ -86,7 +86,7 @@ fn scale_pools(base: usize, factor: u32) {
             })
         };
         if at[..9] != BUILDING_POOL_BYTES || call(0x20) != Some(base + POOL_SIZE_LOOKUP) {
-            tracing::warn!("VICTORY_POOL_SCALE: not the image it knows; pools left alone");
+            tracing::warn!("M1LK_POOL_SCALE: not the image it knows; pools left alone");
             return;
         }
         let read32 = |at: usize| (at as *const u32).read_unaligned();
@@ -130,7 +130,7 @@ fn scale_pools(base: usize, factor: u32) {
             }
         }
         if jump.is_null() {
-            tracing::warn!("VICTORY_POOL_SCALE: no memory near the image for the jump; pools left alone");
+            tracing::warn!("M1LK_POOL_SCALE: no memory near the image for the jump; pools left alone");
             return;
         }
         // jmp [rip+0]; dq scaled_pool_size
@@ -158,7 +158,7 @@ fn scale_pools(base: usize, factor: u32) {
         use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         FlushInstructionCache(GetCurrentProcess(), std::ptr::null(), 0);
-        tracing::warn!(factor, sites = sites.len(), patched, hashes = ?POOL_HASHES.get(), "VICTORY_POOL_SCALE: pool sizes hooked");
+        tracing::warn!(factor, sites = sites.len(), patched, hashes = ?POOL_HASHES.get(), "M1LK_POOL_SCALE: pool sizes hooked");
     }
 }
 

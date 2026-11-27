@@ -278,7 +278,7 @@ fn run_cases_on(
             continue;
         };
         if skip_software(&host) {
-            eprintln!("{label}: the software adapter is skipped (VICTORY_TESTS_ALLOW_SOFTWARE_SKIP=1)");
+            eprintln!("{label}: the software adapter is skipped (M1LK_TESTS_ALLOW_SOFTWARE_SKIP=1)");
             skipped_software += 1;
             continue;
         }
@@ -313,7 +313,7 @@ fn run_cases_on(
     }
     if ran == 0 && skipped_software > 0 && skipped_absent + skipped_software == devices.len() {
         // CI has no graphics card: every device was absent, or the software one was skipped by the variable.
-        eprintln!("no SM 6.6 device to run on; the software adapter is skipped (VICTORY_TESTS_ALLOW_SOFTWARE_SKIP=1)");
+        eprintln!("no SM 6.6 device to run on; the software adapter is skipped (M1LK_TESTS_ALLOW_SOFTWARE_SKIP=1)");
         return;
     }
     if ran == 0 && devices.iter().all(|&(_, warp)| !warp) {
@@ -1663,7 +1663,7 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
             continue;
         };
         if skip_software(&host) {
-            eprintln!("{label}: the software adapter is skipped (VICTORY_TESTS_ALLOW_SOFTWARE_SKIP=1)");
+            eprintln!("{label}: the software adapter is skipped (M1LK_TESTS_ALLOW_SOFTWARE_SKIP=1)");
             continue;
         }
         let (root, pso) = match host.compute_pipeline(&shader) {

@@ -578,7 +578,7 @@ fn scalar_bit_tests_lower() {
 }
 
 #[test]
-#[ignore = "ours marks joins read through joins only with VICTORY_STRICT_JOINS (40 programs stop otherwise)"]
+#[ignore = "ours marks joins read through joins only with M1LK_STRICT_JOINS (40 programs stop otherwise)"]
 fn a_missing_value_stays_missing_through_two_live_joins() {
     let mut words = [
         0xF490_0180,

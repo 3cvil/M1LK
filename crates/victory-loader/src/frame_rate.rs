@@ -48,7 +48,7 @@ pub fn asked_interval_ms() -> Option<f64> {
     let spec = std::env::var("VICTORY_FRAME_INTERVAL_MS").ok()?;
     let ms = parse_interval_ms(&spec);
     if ms.is_none() {
-        eprintln!("VIctory: VICTORY_FRAME_INTERVAL_MS={spec}: expected milliseconds from 0 (no wait) to 1000");
+        eprintln!("VIctory: M1LK_FRAME_INTERVAL_MS={spec}: expected milliseconds from 0 (no wait) to 1000");
     }
     ms
 }
@@ -215,7 +215,7 @@ pub unsafe fn apply(base: usize, size: usize, rate: u32, sites: &[Site]) -> Vec<
             })();
             let offset = format_args!("{:#x}", site.at);
             match done {
-                Patched::Done => tracing::info!(site = %offset, kind = ?site.kind, rate, "frame rate: the title's read of its frame rate setting patched (VICTORY_FRAME_INTERVAL_MS)"),
+                Patched::Done => tracing::info!(site = %offset, kind = ?site.kind, rate, "frame rate: the title's read of its frame rate setting patched (M1LK_FRAME_INTERVAL_MS)"),
                 Patched::Differs => tracing::warn!(site = %offset, "frame rate: not patched, the title's bytes there are not the ones expected (another build?)"),
                 Patched::Failed(why) => tracing::warn!(site = %offset, why, "frame rate: not patched"),
             }

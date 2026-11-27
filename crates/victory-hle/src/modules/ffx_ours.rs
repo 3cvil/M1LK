@@ -89,7 +89,7 @@ fn spatial_no_jitter() -> bool {
             .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
         if on {
-            tracing::info!("spatial upscaler queries report 1 phase and zero jitter (VICTORY_SPATIAL_NO_JITTER=1)");
+            tracing::info!("spatial upscaler queries report 1 phase and zero jitter (M1LK_SPATIAL_NO_JITTER=1)");
         }
         on
     }) && victory_gpu::upscale::chosen() == "spatial"

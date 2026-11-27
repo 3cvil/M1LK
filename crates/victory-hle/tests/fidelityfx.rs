@@ -157,7 +157,7 @@ fn half(bits: u16) -> f32 {
 #[test]
 fn the_titles_upscaler_runs_on_the_host() {
     let Some(dir) = std::env::var_os("VICTORY_FIDELITYFX_DIR") else {
-        eprintln!("VICTORY_FIDELITYFX_DIR not set; skipped");
+        eprintln!("M1LK_FIDELITYFX_DIR not set; skipped");
         return;
     };
     // The debug layer, before anything makes the host device: it checks

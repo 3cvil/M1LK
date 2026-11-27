@@ -199,7 +199,7 @@ fn make_for(device: &ID3D12Device) -> windows::core::Result<Clamp> {
     // (`KevinPratap/ApexIV` 1acecac; `Marvisak/VIctory#1799`).
     let zero_garbage = std::env::var_os("VICTORY_INDIRECT_ZERO_GARBAGE").is_some_and(|v| v == "1");
     if zero_garbage {
-        tracing::info!("indirect clamp zeros oversized mesh records (VICTORY_INDIRECT_ZERO_GARBAGE=1)");
+        tracing::info!("indirect clamp zeros oversized mesh records (M1LK_INDIRECT_ZERO_GARBAGE=1)");
     }
     let source = if zero_garbage {
         format!("#define ZERO_GARBAGE 1

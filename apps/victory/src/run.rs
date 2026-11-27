@@ -86,7 +86,7 @@ pub fn run(
         victory_hle::modules::fidelityfx::use_host_dir(cfg.fidelityfx_dir.as_deref());
         anyhow::ensure!(
             victory_hle::modules::fidelityfx::serving(),
-            "FSR at 4K requires the PC FidelityFX provider. Set VICTORY_FIDELITYFX_DIR to its folder."
+            "FSR at 4K requires the PC FidelityFX provider. Set M1LK_FIDELITYFX_DIR to its folder."
         );
         let cache = format!("images/fsr-{}-4k-sdr", preset.name());
         victory_loader::load(&prepared, &cfg.cache_subdir(&cache)?)?

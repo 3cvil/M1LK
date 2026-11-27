@@ -428,7 +428,7 @@ unsafe fn step_over(info: *mut EXCEPTION_POINTERS) -> bool {
         tracing::warn!(
             offset = format_args!("{offset:#x}"),
             n,
-            "stepped over the title's breakpoint (VICTORY_STEP_OVER): the code behind it goes on"
+            "stepped over the title's breakpoint (M1LK_STEP_OVER): the code behind it goes on"
         );
     }
     true

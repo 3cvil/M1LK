@@ -39,8 +39,8 @@ fn asked() -> Option<Duration> {
         let spec = std::env::var("VICTORY_FRAME_INTERVAL_MS").ok()?;
         let ms = parse_ms(&spec);
         match ms {
-            Some(d) => tracing::info!(interval = ?d, "frame interval of ours in place of the title's (VICTORY_FRAME_INTERVAL_MS)"),
-            None => tracing::warn!(spec, "VICTORY_FRAME_INTERVAL_MS: expected milliseconds from 0 to 1000; the title's interval kept"),
+            Some(d) => tracing::info!(interval = ?d, "frame interval of ours in place of the title's (M1LK_FRAME_INTERVAL_MS)"),
+            None => tracing::warn!(spec, "M1LK_FRAME_INTERVAL_MS: expected milliseconds from 0 to 1000; the title's interval kept"),
         }
         ms
     })

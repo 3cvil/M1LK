@@ -46,7 +46,7 @@ pub fn asked_output() -> Option<(u32, u32)> {
     let spec = std::env::var("VICTORY_OUTPUT").ok()?;
     let size = parse_output(&spec);
     if size.is_none() {
-        eprintln!("VIctory: VICTORY_OUTPUT={spec}: expected one of the title's modes: 1920x1080, 2560x1440, 1280x720, 1664x936, 3840x2160");
+        eprintln!("VIctory: M1LK_OUTPUT={spec}: expected one of the title's modes: 1920x1080, 2560x1440, 1280x720, 1664x936, 3840x2160");
     }
     size
 }
@@ -66,7 +66,7 @@ pub fn asked_render_scale() -> Option<f32> {
     let spec = std::env::var("VICTORY_RENDER_SCALE").ok()?;
     let scale = parse_render_scale(&spec);
     if scale.is_none() {
-        eprintln!("VIctory: VICTORY_RENDER_SCALE={spec}: expected 0.5 to 1.0");
+        eprintln!("VIctory: M1LK_RENDER_SCALE={spec}: expected 0.5 to 1.0");
     }
     scale
 }
@@ -80,7 +80,7 @@ pub fn asked_upscaler() -> Option<u32> {
     let spec = std::env::var("VICTORY_UPSCALER").ok()?;
     let kind = spec.trim().parse::<u32>().ok().filter(|k| matches!(k, 6 | 7));
     if kind.is_none() {
-        eprintln!("VIctory: VICTORY_UPSCALER={spec}: expected 6 (the title's own) or 7 (FidelityFX)");
+        eprintln!("VIctory: M1LK_UPSCALER={spec}: expected 6 (the title's own) or 7 (FidelityFX)");
     }
     kind
 }

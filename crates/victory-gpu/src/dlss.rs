@@ -463,7 +463,7 @@ impl DlssUpscaler {
     }
 
     fn init(device: &ID3D12Device, settings: DlssSettings) -> Result<Self> {
-        let dir = dll_dir().context("no VICTORY_DLSS_DLL_DIR and no executable folder")?;
+        let dir = dll_dir().context("no M1LK_DLSS_DLL_DIR and no executable folder")?;
         if !dir.join("nvngx_dlss.dll").is_file() {
             bail!("no nvngx_dlss.dll in {} (tools/Setup-Dlss.ps1 installs it)", dir.display());
         }

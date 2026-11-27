@@ -357,7 +357,7 @@ fn window_mapped_for(size: u64) -> Option<(ID3D12Resource, *mut u8)> {
             most_mb = most >> 20,
             card_budget_mb = budget >> 20,
             card_used_mb = used >> 20,
-            "windows in card memory the CPU maps (VICTORY_WINDOWS_BAR_MB)"
+            "windows in card memory the CPU maps (M1LK_WINDOWS_BAR_MB)"
         );
     }
     Some(made)
@@ -1517,7 +1517,7 @@ pub(crate) fn back_line(frames: f64) {
     tracing::info!(
         "shader writes looked for on the CPU per frame: {:.1} MB compared in {:.0} ranges of windows outside buffers ({:.1} MB \
          snapshotted), {:.1} MB in {:.0} ranges of title buffers' copies ({:.1} MB snapshotted), of them {:.1} MB in copies \
-         of 1 MiB or more (VICTORY_CARD_BUFFERS_MIN_MB=1 would have the card look there)",
+         of 1 MiB or more (M1LK_CARD_BUFFERS_MIN_MB=1 would have the card look there)",
         mb(c[2]),
         c[5],
         mb(c[0]),
@@ -2187,7 +2187,7 @@ impl Shadow {
             tracing::warn!(
                 start = format_args!("{:#x}", self.start),
                 len = self.len,
-                "a shader writes a window in card memory the CPU maps: its snapshot reads through the bus (slow; VICTORY_WINDOWS_BAR_MB)"
+                "a shader writes a window in card memory the CPU maps: its snapshot reads through the bus (slow; M1LK_WINDOWS_BAR_MB)"
             );
         }
         // The parts no declared range holds yet: their bytes are taken now,
@@ -2899,7 +2899,7 @@ impl Shadow {
                                 refreshed = format_args!("{from:#x}..{to:#x}"),
                                 on_the_card = self.card.is_some(),
                                 window = self.window,
-                                "a host copy of title memory is stale after its refresh, three times in a row:                                  the memory changed with nothing to tell of it (VICTORY_REFRESH_CHECK=1)"
+                                "a host copy of title memory is stale after its refresh, three times in a row:                                  the memory changed with nothing to tell of it (M1LK_REFRESH_CHECK=1)"
                             );
                         }
                     }

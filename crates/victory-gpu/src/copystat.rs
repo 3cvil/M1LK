@@ -820,7 +820,7 @@ fn log_memory() {
         mb(made[5]),
     );
     tracing::info!(
-        "memory, placed textures: {} of them were asked for again with other filler words in their description          (one resource and host copy each since the filler left the key; VICTORY_PLACED_FILLER=1 keeps it)",
+        "memory, placed textures: {} of them were asked for again with other filler words in their description          (one resource and host copy each since the filler left the key; M1LK_PLACED_FILLER=1 keeps it)",
         crate::resource::placed_filler_twins()
     );
     // What the line above leaves open: what is alive of the buffers "made
@@ -829,7 +829,7 @@ fn log_memory() {
     let bar = crate::shadow::window_mapped_stats();
     if bar[1] + bar[2] > 0 {
         tracing::info!(
-            "memory, windows in card memory the CPU maps (VICTORY_WINDOWS_BAR_MB): {:.0} MB alive, {} made and {} \
+            "memory, windows in card memory the CPU maps (M1LK_WINDOWS_BAR_MB): {:.0} MB alive, {} made and {} \
              refused for the card's budget since the start, {} snapshots read through the bus",
             mb(bar[0]),
             bar[1],
@@ -942,7 +942,7 @@ fn log_memory() {
             ("made card buffers so far", made[5]),
         ];
         tracing::info!(
-            "memory by category (VICTORY_MEMORY_CATEGORIES=1, approximate and overlapping, not a sum): {}",
+            "memory by category (M1LK_MEMORY_CATEGORIES=1, approximate and overlapping, not a sum): {}",
             category_text(fields)
         );
     }

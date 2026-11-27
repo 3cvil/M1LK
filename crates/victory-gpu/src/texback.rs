@@ -40,7 +40,7 @@ fn kinds() -> &'static [(u64, u32, u32)] {
             })
             .collect();
         if !kinds.is_empty() {
-            tracing::info!(?kinds, "textures of these kinds that shaders write are copied back into title memory (VICTORY_TEXTURE_BACK)");
+            tracing::info!(?kinds, "textures of these kinds that shaders write are copied back into title memory (M1LK_TEXTURE_BACK)");
         }
         kinds
     })
@@ -291,7 +291,7 @@ impl Writer {
                 tracing::info!(
                     replaced,
                     written = WRITTEN.load(std::sync::atomic::Ordering::Relaxed),
-                    "texture read-backs replaced by a newer copy before they were written (VICTORY_TEXBACK_ASYNC=0 writes each)"
+                    "texture read-backs replaced by a newer copy before they were written (M1LK_TEXBACK_ASYNC=0 writes each)"
                 );
             }
         }

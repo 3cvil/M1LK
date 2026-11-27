@@ -1878,7 +1878,7 @@ impl State {
                 queued_at_the_last_pass = slots,
                 due_at_the_last_pass = due,
                 uploaded_so_far = HEAP_TEXTURES.load(Ordering::Relaxed),
-                "a draw of the title's decoration bake: textures picked by index are uploaded first (VICTORY_BAKE_TEXTURES_MS=0: not)"
+                "a draw of the title's decoration bake: textures picked by index are uploaded first (M1LK_BAKE_TEXTURES_MS=0: not)"
             );
         }
         let began = std::time::Instant::now();
@@ -3691,7 +3691,7 @@ impl State {
             return false;
         };
         if kind == MESH && (mesh_test() == 1 || !mesh_kept(self.pipeline)) {
-            why("mesh draws are switched off (VICTORY_MESH_TEST=skip)");
+            why("mesh draws are switched off (M1LK_MESH_TEST=skip)");
             return false;
         }
         // A window of records clamped in one pass (`windows`): for single

@@ -24,12 +24,14 @@ The cursor starts free. Left-click in the game window to start mouse look, which
 
 ## Settings
 
-- `VICTORY_MOUSE_LOOK=0` turns mouse look off and leaves the cursor alone. The mouse buttons still work.
-- `VICTORY_MOUSE_SENSITIVITY=<number>` scales mouse look. The default is 1, and 2 turns twice as fast.
-- `VICTORY_KEYBINDS` changes what keys and mouse buttons press on the stand-in pad. It is a comma-separated list of `Key=Target` entries. Each entry replaces what that key did. Names are case-insensitive. An entry that is not understood is left out, with a warning in the log.
+Settings use the `M1LK_` prefix; the older `VICTORY_` names still work.
+
+- `M1LK_MOUSE_LOOK=0` turns mouse look off and leaves the cursor alone. The mouse buttons still work.
+- `M1LK_MOUSE_SENSITIVITY=<number>` scales mouse look. The default is 1, and 2 turns twice as fast.
+- `M1LK_KEYBINDS` changes what keys and mouse buttons press on the stand-in pad. It is a comma-separated list of `Key=Target` entries. Each entry replaces what that key did. Names are case-insensitive. An entry that is not understood is left out, with a warning in the log.
 
 ```text
-VICTORY_KEYBINDS=Space=X,LShift=A,F=Y,Mouse4=LB,Enter=None
+M1LK_KEYBINDS=Space=X,LShift=A,F=Y,Mouse4=LB,Enter=None
 ```
 
 Keys are letters, digits, `F1` to `F12`, `Space`, `Enter`, `Esc`, `Tab`, `Backspace`, `Up`, `Down`, `Left`, `Right`, `LShift`, `RShift`, `LCtrl`, `RCtrl`, `LAlt`, `RAlt`, and `Mouse1` to `Mouse5` (`LMB`, `RMB` and `MMB` also work).

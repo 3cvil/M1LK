@@ -100,7 +100,7 @@ pub fn keep_on_efficiency_cores(what: &str) {
     if ok == 0 {
         tracing::warn!(what, error = %std::io::Error::last_os_error(), "the thread could not be kept on the efficiency cores");
     } else {
-        tracing::info!(what, slow = slow.len(), of, "the thread is kept on the efficiency cores (VICTORY_FAST_CORES=0: not)");
+        tracing::info!(what, slow = slow.len(), of, "the thread is kept on the efficiency cores (M1LK_FAST_CORES=0: not)");
     }
 }
 
@@ -123,7 +123,7 @@ fn ask(what: &str, from: u32) {
     if ok == 0 {
         tracing::warn!(what, error = %std::io::Error::last_os_error(), "the thread could not be kept on the fast cores");
     } else {
-        tracing::info!(what, fast = fast.len(), of, "the thread is kept on the fast cores (VICTORY_FAST_CORES=0: not)");
+        tracing::info!(what, fast = fast.len(), of, "the thread is kept on the fast cores (M1LK_FAST_CORES=0: not)");
     }
 }
 

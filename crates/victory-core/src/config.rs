@@ -69,7 +69,7 @@ impl Config {
             Some((path, text))
         } else if let Some(p) = explicit {
             anyhow::bail!(
-                "VICTORY_CONFIG points at {}, which does not exist",
+                "M1LK_CONFIG points at {}, which does not exist",
                 p.display()
             );
         } else {
@@ -124,7 +124,7 @@ impl Config {
     /// The game directory, or a helpful error if it is not configured.
     pub fn require_game_dir(&self) -> Result<&Path> {
         self.game_dir.as_deref().context(
-            "no game directory configured: set VICTORY_GAME_DIR or [paths].game_dir in \
+            "no game directory configured: set M1LK_GAME_DIR or [paths].game_dir in \
              m1lk.toml (see m1lk.example.toml)",
         )
     }
@@ -153,7 +153,7 @@ fn default_dir(name: &str) -> Result<PathBuf> {
         .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .context("cannot determine a user directory; set VICTORY_CACHE_DIR and VICTORY_DATA_DIR")?;
+        .context("cannot determine a user directory; set M1LK_CACHE_DIR and M1LK_DATA_DIR")?;
     Ok(base.join("M1LK").join(name))
 }
 

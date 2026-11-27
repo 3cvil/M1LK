@@ -683,7 +683,7 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
         match host.log_messages() {
             Some(first) => text.push_str(&format!("; debug layer: {first}")),
             None if host.messages.is_none() => text.push_str(
-                "; a diagnostics build with VICTORY_D3D12_DEBUG=1 names the command",
+                "; a diagnostics build with M1LK_D3D12_DEBUG=1 names the command",
             ),
             None => {}
         }
@@ -812,7 +812,7 @@ fn create() -> windows::core::Result<Host> {
                 None,
                 None,
             );
-            tracing::info!(ok = set.is_ok(), "the host's background shader work is switched off (VICTORY_D3D12_BACKGROUND=0)");
+            tracing::info!(ok = set.is_ok(), "the host's background shader work is switched off (M1LK_D3D12_BACKGROUND=0)");
         }
         // the widest wave the GPU runs: 32 (NVIDIA) gets console wave64 compute programs whose
         // cross-lane code stays in 32-lane halves translated for waves of 32
@@ -943,7 +943,7 @@ fn pick_hardware_adapter() -> Option<IDXGIAdapter1> {
                 i += 1;
             }
             if picked.is_none() {
-                tracing::warn!(want, "VICTORY_ADAPTER matched no hardware adapter; using the high-performance one");
+                tracing::warn!(want, "M1LK_ADAPTER matched no hardware adapter; using the high-performance one");
             }
         }
         if picked.is_none() {
@@ -964,7 +964,7 @@ fn pick_hardware_adapter() -> Option<IDXGIAdapter1> {
             vram_mb = d.DedicatedVideoMemory / (1 << 20),
             shared_mb = d.SharedSystemMemory / (1 << 20),
             vendor = format_args!("{:#x}", d.VendorId),
-            "host adapter chosen (VICTORY_ADAPTER=<index|name> overrides)"
+            "host adapter chosen (M1LK_ADAPTER=<index|name> overrides)"
         );
         Some(a)
     }
@@ -3516,16 +3516,16 @@ fn late_threads() {
         tracing::info!(
             most = late_most(),
             writes = late_writes(),
-            "submissions are sent to the card without a wait for each (VICTORY_LATE_WAIT=1)"
+            "submissions are sent to the card without a wait for each (M1LK_LATE_WAIT=1)"
         );
         if relay() {
             // Without it nothing would ever land.
             if let Err(e) = std::thread::Builder::new().name("victory-relay".into()).spawn(relay_worker) {
-                fail(format_args!("no thread to land submissions sent ahead (VICTORY_RELAY=1): {e}"));
+                fail(format_args!("no thread to land submissions sent ahead (M1LK_RELAY=1): {e}"));
             }
             tracing::info!(
                 exact = relay_exact(),
-                "what shaders wrote is copied back by a thread of its own, beside the submitting thread (VICTORY_RELAY=1)"
+                "what shaders wrote is copied back by a thread of its own, beside the submitting thread (M1LK_RELAY=1)"
             );
         }
     });
@@ -3639,7 +3639,7 @@ fn relay_worker() {
     };
     // SAFETY: a plain event of our own.
     let Ok(event) = (unsafe { CreateEventW(None, false, false, None) }) else {
-        fail(format_args!("no event for the thread that lands submissions sent ahead (VICTORY_RELAY=1)"));
+        fail(format_args!("no event for the thread that lands submissions sent ahead (M1LK_RELAY=1)"));
     };
     let mut fetch: Option<RelayFetch> = None;
     loop {
@@ -3794,7 +3794,7 @@ fn late_line(frames: f64) {
     if relay() {
         let r: Vec<f64> = RELAY_STATS.iter().map(|r| r.swap(0, Ordering::Relaxed) as f64 / frames).collect();
         tracing::info!(
-            "the relay per frame (VICTORY_RELAY=1): {:.1} flights landed in {:.1} landings by the thread that copies back, \
+            "the relay per frame (M1LK_RELAY=1): {:.1} flights landed in {:.1} landings by the thread that copies back, \
              beside the submitting thread; that thread waited {:.1} ms for the card with nothing to land and {:.1} ms for \
              fetches of card copies' pieces, and was {:.1} ms landing in all (the frame line's \"copying back\" is its time; \
              \"settles\" above are waits of other threads for it)",
@@ -3832,7 +3832,7 @@ fn late_line(frames: f64) {
     if late_exact() {
         let [pages, runs, bytes] = crate::shadow::merged_stats().map(|n| n as f64 / frames);
         tracing::info!(
-            "title bytes put in under flights' shader writes per frame (VICTORY_LATE_WAIT=2): {pages:.0} pages looked at, \
+            "title bytes put in under flights' shader writes per frame (M1LK_LATE_WAIT=2): {pages:.0} pages looked at, \
              {runs:.0} changed runs, {:.2} MB",
             bytes / (1 << 20) as f64
         );
@@ -4981,14 +4981,14 @@ impl Host {
             *fetch = self.make_relay_fetch();
         }
         let Some(f) = fetch.as_mut() else {
-            fail(format_args!("no list, fence or event to fetch what shaders wrote to the card's memory (VICTORY_RELAY=1)"));
+            fail(format_args!("no list, fence or event to fetch what shaders wrote to the card's memory (M1LK_RELAY=1)"));
         };
         if f.buffer.as_ref().is_none_or(|b| b.2 < total) {
             let size = total.next_multiple_of(16 << 20);
             f.buffer = self.shared_buffer(size).map(|(buffer, data)| (buffer, data as usize, size));
         }
         let Some((buffer, data, _)) = f.buffer.clone() else {
-            fail(format_args!("no memory to fetch what shaders wrote to the card's memory ({total} bytes, VICTORY_RELAY=1)"));
+            fail(format_args!("no memory to fetch what shaders wrote to the card's memory ({total} bytes, M1LK_RELAY=1)"));
         };
         #[cfg(feature = "diagnostics")]
         if let Some((started, probe)) = &mut probe {
@@ -5046,7 +5046,7 @@ impl Host {
         };
         let (after, through) = match ran {
             Ok(order) => order,
-            Err(e) => fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e}, VICTORY_RELAY=1)")),
+            Err(e) => fail(format_args!("what shaders wrote to the card's memory could not be fetched ({e}, M1LK_RELAY=1)")),
         };
         let us = waiting.elapsed().as_micros() as u64;
         RELAY_STATS[3].fetch_add(us, Ordering::Relaxed);
@@ -5113,7 +5113,7 @@ impl Host {
                 if unsafe { self.device.GetDeviceRemovedReason() }.is_err() {
                     let runs: Vec<&HostList> = flights.iter().flat_map(|f| f.order.iter().map(|&i| f.lists[i].host())).collect();
                     fail(format_args!(
-                        "host GPU device removed after {} submissions sent ahead (VICTORY_RELAY=1) of {} lists{}{}",
+                        "host GPU device removed after {} submissions sent ahead (M1LK_RELAY=1) of {} lists{}{}",
                         flights.len(),
                         runs.len(),
                         self.removal_data(&runs),
@@ -5561,7 +5561,7 @@ impl Host {
                         .flat_map(|f| f.order.iter().map(|&i| f.lists[i].host()))
                         .collect();
                     fail(format_args!(
-                        "host GPU device removed after {flights} submissions sent ahead (VICTORY_LATE_WAIT=1) of {} lists{}{}",
+                        "host GPU device removed after {flights} submissions sent ahead (M1LK_LATE_WAIT=1) of {} lists{}{}",
                         runs.len(),
                         self.removal_data(&runs),
                         last_notes(&runs)
@@ -6559,7 +6559,7 @@ impl HostList {
         if !due.is_empty() {
             static SAID: std::sync::Once = std::sync::Once::new();
             SAID.call_once(|| {
-                tracing::info!("depth planes written by shaders are drawn into the plane before the next draw or dispatch, not when the list closes (VICTORY_PLANE_NOW=0: as before)");
+                tracing::info!("depth planes written by shaders are drawn into the plane before the next draw or dispatch, not when the list closes (M1LK_PLANE_NOW=0: as before)");
             });
         }
         !due.is_empty()
@@ -8168,7 +8168,7 @@ impl Meter {
             let [through, left] = [0, 1].map(|i| crate::texture::UNLOCKED[i].swap(0, Ordering::Relaxed) as f64 / frames);
             if through + left > 0.0 {
                 tracing::info!(
-                    "texture refreshes that did not wait for title memory to hold still, per frame (VICTORY_TEXTURE_NO_WAIT=1): \
+                    "texture refreshes that did not wait for title memory to hold still, per frame (M1LK_TEXTURE_NO_WAIT=1): \
                      {through:.1} read through the kernel, {left:.1} left for the next refresh (a page was not there)"
                 );
             }
@@ -8178,7 +8178,7 @@ impl Meter {
             if copies > 0.0 {
                 tracing::info!(
                     "title buffer copies recorded per frame: {copies:.0}, of them {joined:.0} continue the one before \
-                     (VICTORY_JOIN_COPIES=1 makes those one copy with it: now {})",
+                     (M1LK_JOIN_COPIES=1 makes those one copy with it: now {})",
                     if join_copies() { "on" } else { "off" }
                 );
             }
@@ -8188,7 +8188,7 @@ impl Meter {
             let quiet = QUIET_REFRESHES.swap(0, Ordering::Relaxed) as f64 / frames;
             if quiet > 0.0 {
                 tracing::info!(
-                    "refreshes of copies told quiet from the journal per frame (VICTORY_QUIET_REFRESH=0 runs them): {quiet:.0}"
+                    "refreshes of copies told quiet from the journal per frame (M1LK_QUIET_REFRESH=0 runs them): {quiet:.0}"
                 );
             }
         }
@@ -8206,7 +8206,7 @@ impl Meter {
                 std::array::from_fn::<f64, 2, _>(|i| crate::heap_worker::STATS[i].swap(0, Ordering::Relaxed) as f64 / frames);
             if busy > 0.0 {
                 tracing::info!(
-                    "textures picked by index, their own thread (VICTORY_HEAP_WORKER), per frame: {:.1} ms at work, {lists:.1} lists given to submissions",
+                    "textures picked by index, their own thread (M1LK_HEAP_WORKER), per frame: {:.1} ms at work, {lists:.1} lists given to submissions",
                     busy / 1e6
                 );
             }

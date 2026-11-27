@@ -173,7 +173,7 @@ pub(crate) fn kick(heap: &Heap) -> bool {
         JOB.get_or_init(|| Job { heap: Mutex::new(None), wake: Condvar::new() });
         match std::thread::Builder::new().name("victory-heap".into()).spawn(worker) {
             Ok(_) => {
-                tracing::info!("textures picked by index are uploaded by a thread of their own (VICTORY_HEAP_WORKER)");
+                tracing::info!("textures picked by index are uploaded by a thread of their own (M1LK_HEAP_WORKER)");
                 true
             }
             Err(e) => {

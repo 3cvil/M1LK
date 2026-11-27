@@ -2,6 +2,7 @@
 
 #[cfg(not(windows))]
 fn main() {
+    victory_core::env_alias::apply();
     eprintln!("M1LK requires Windows.");
 }
 
@@ -11,6 +12,7 @@ mod windows_launcher;
 
 #[cfg(windows)]
 fn main() {
+    victory_core::env_alias::apply();
     if let Err(error) = windows_launcher::run(false) {
         windows_launcher::show_error(&format!("{error:#}"));
         std::process::exit(1);

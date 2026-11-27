@@ -59,7 +59,7 @@ shaders and emulates the one instruction.
    64-lane waves running on a GPU with 32-lane waves.
 5. **A safety rule on the host side.** The builder's stages run only while
    every builder pipeline the title has created has a host pipeline; otherwise
-   none run (`VICTORY_BVH_BUILDER=1` asks for it; `VICTORY_BVH_QUARANTINE=1`
+   none run (`M1LK_BVH_BUILDER=1` asks for it; `M1LK_BVH_QUARANTINE=1`
    also keeps the builder's stores out of title memory, for a first test). A
    partly working builder wrote garbage bounds into title memory and crashed
    the title.

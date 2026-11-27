@@ -1194,7 +1194,7 @@ mod tests {
             );
             bad += u32::from(walked != counted || errors > 0);
         }
-        assert!(streams > 0, "VICTORY_XMA_STREAMS contains no .xma files");
+        assert!(streams > 0, "M1LK_XMA_STREAMS contains no .xma files");
         assert_eq!(bad, 0);
     }
 

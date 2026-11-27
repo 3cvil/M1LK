@@ -184,7 +184,7 @@ fn parse_binds(list: &str) -> Vec<(u8, Bind)> {
             .split_once('=')
             .and_then(|(key, to)| Some((key_named(key.trim())?, bind_named(to.trim())?)));
         let Some((vk, bind)) = parsed else {
-            tracing::warn!(entry, "VICTORY_KEYBINDS: entry not understood, left out");
+            tracing::warn!(entry, "M1LK_KEYBINDS: entry not understood, left out");
             continue;
         };
         binds.retain(|&(key, _)| key != vk);

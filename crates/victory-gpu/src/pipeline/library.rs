@@ -323,7 +323,7 @@ pub(crate) fn removal_note() -> String {
     let _ = write!(
         text,
         "; its file is mapped ({len} bytes), the handle {}",
-        if holds() { "kept open" } else { "closed (VICTORY_LIBRARY_HANDLE=0)" }
+        if holds() { "kept open" } else { "closed (M1LK_LIBRARY_HANDLE=0)" }
     );
     match REPLACED[0].load(Ordering::Relaxed) {
         0 => text.push_str("; this run has not replaced the file"),
