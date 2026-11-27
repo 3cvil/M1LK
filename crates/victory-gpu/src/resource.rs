@@ -2483,6 +2483,7 @@ fn host_texture(
         if let Err(e) = made {
             let out_of_memory = e.code() == windows::Win32::Foundation::E_OUTOFMEMORY;
             OUT_OF_MEMORY.set(out_of_memory);
+            crate::lowcommit::allocation_error(&e);
             // (Out of memory: told once per texture, by `hosted`.)
             if !out_of_memory {
                 tracing::warn!(error = %e, desc = ?d, "no host texture");

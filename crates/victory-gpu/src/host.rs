@@ -7948,6 +7948,7 @@ impl Host {
         match self.mapped_upload(size, D3D12_HEAP_TYPE_UPLOAD) {
             Ok(mapped) => Some(mapped),
             Err(e) => {
+                crate::lowcommit::allocation_error(&e);
                 tracing::warn!(error = %e, size, "no upload buffer");
                 None
             }

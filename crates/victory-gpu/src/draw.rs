@@ -119,7 +119,7 @@ thread_local! {
     /// While `State::early_textures` runs the texture pass: the
     /// milliseconds and the bytes that run may take, in place of the
     /// pass's own per frame.
-    static PASS_BUDGET: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+    static PASS_BUDGET: std::cell::Cell<Option<(u64, u64, bool)>> = const { std::cell::Cell::new(None) };
 }
 
 /// The milliseconds of every frame the pass that uploads textures picked
@@ -1766,21 +1766,20 @@ impl State {
         // into the opening cutscene; with every frame it ran on). The pass
         // costs some 30 ms a frame this way.
         static WHOLE: std::sync::Mutex<Option<std::collections::HashMap<usize, u64>>> = std::sync::Mutex::new(None);
+        // `VICTORY_UNWATCHED_FRAMES` sets the interval (1: every frame).
+        static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let every = *EVERY.get_or_init(|| {
+            std::env::var("VICTORY_UNWATCHED_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
+        });
+        // At every frame nothing is remembered (the map only grew: one entry
+        // per copy ever refreshed; ported from Pavl3000/cgbj-fork 18bdf793).
         let mut whole = WHOLE.lock().unwrap_or_else(|e| e.into_inner());
         let whole = whole.get_or_insert_with(Default::default);
         for (shadow, from, to) in &spans {
-            if shadow.unwatched() {
+            if every > 1 && shadow.unwatched() {
                 // By the copy's number: a copy made where one let go was
                 // (`shadow::let_go_idle`) has never been refreshed.
                 let key = shadow.id() as usize;
-                // `VICTORY_UNWATCHED_FRAMES` sets the interval (1: every frame).
-                static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-                let every = *EVERY.get_or_init(|| {
-                    std::env::var("VICTORY_UNWATCHED_FRAMES")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(1)
-                });
                 match whole.get(&key) {
                     Some(&last) if frame < last + every => continue,
                     _ => {
@@ -1882,7 +1881,7 @@ impl State {
             );
         }
         let began = std::time::Instant::now();
-        PASS_BUDGET.set(Some(budget));
+        PASS_BUDGET.set(Some((budget.0, budget.1, bake)));
         Self::heap_textures(Into::List(list), heap, host);
         PASS_BUDGET.set(None);
         if bake {
@@ -2025,6 +2024,12 @@ impl State {
             HEAP_TEXTURES_RECHECKED[1].fetch_add(changed, Ordering::Relaxed);
             HEAP_TEXTURES_RECHECKED[2].store(waiting, Ordering::Relaxed);
         }
+        // Low commit: leave Windows commit for the game's own allocations, and
+        // do not ask again at once after a refusal. The slots stay queued.
+        let required = PASS_BUDGET.get().is_some_and(|(_, _, bake)| bake);
+        if !crate::lowcommit::admit_texture_pass(required) {
+            return;
+        }
         let wanted = crate::material_demand::enabled().then(|| host.material_demand.take(heap, host, frame));
         let (mut due, census) = host.texture_slots_due(frame, 4096);
         if let Some(wanted) = wanted {
@@ -2091,14 +2096,25 @@ impl State {
         // own: its bytes on top of what the frame has spent so far.
         // (Not `most`: that is the longest wait between looks, used below.)
         let (span, bytes_at_most) = match PASS_BUDGET.get() {
-            Some((ms, bytes)) => {
+            Some((ms, bytes, _)) => {
                 (std::time::Duration::from_millis(ms), SPENT.load(Ordering::Relaxed).saturating_add(bytes))
             }
             None => (span, per_frame),
         };
+        // Low commit (`crate::lowcommit`): a bake samples its inputs at once
+        // and cannot retry, so only look-ahead staging is capped.
+        let required = PASS_BUDGET.get().is_some_and(|(_, _, bake)| bake);
+        let bytes_at_most = if required {
+            bytes_at_most
+        } else {
+            crate::lowcommit::prefetch_limit(bytes_at_most, SPENT.load(Ordering::Relaxed))
+        };
         let began = std::time::Instant::now();
         for (index, write, recovered) in due {
-            if SPENT.load(Ordering::Relaxed) >= bytes_at_most || began.elapsed() > span {
+            if SPENT.load(Ordering::Relaxed) >= bytes_at_most
+                || began.elapsed() > span
+                || !crate::lowcommit::admit_texture_pass(required)
+            {
                 break;
             }
             let ahead = matches!(into, Into::Ahead(_));
