@@ -994,6 +994,36 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    use super::{PourRun, pour_cuts};
+
+    fn runs(spec: &str) -> Vec<PourRun> {
+        // r: plain, w: writes, t: writes title memory; a digit names the list.
+        spec.split(' ')
+            .enumerate()
+            .map(|(i, s)| PourRun {
+                writes: s.contains('w'),
+                title_writes: s.contains('t'),
+                key: s.chars().find(char::is_ascii_digit).map_or(100 + i, |d| d as usize),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pour_cuts_only_at_safe_boundaries() {
+        // Off, or too few runs: no cut.
+        assert!(pour_cuts(&runs("r r r r"), 0, false).is_empty());
+        assert!(pour_cuts(&runs("r r"), 2, false).is_empty());
+        // Every k plain runs; the last chunk keeps the rest.
+        assert_eq!(pour_cuts(&runs("r r r r r"), 2, false), vec![2, 4]);
+        // A chunk that writes ends the cutting.
+        assert_eq!(pour_cuts(&runs("r r w r r r"), 2, false), vec![2]);
+        assert!(pour_cuts(&runs("w r r r"), 1, false).is_empty());
+        // Not ahead of a later title write, unless loose.
+        assert_eq!(pour_cuts(&runs("r r t r r"), 1, false), vec![3, 4]);
+        assert_eq!(pour_cuts(&runs("r r t r r"), 1, true), vec![1, 2, 3, 4]);
+        // Not ahead of the same list prepared again: the chunk grows.
+        assert_eq!(pour_cuts(&runs("r1 r r1 r r"), 1, false), vec![3, 4]);
+    }
     #[test]
     fn raw_memory_reads_follow_each_list_and_guest_copies() {
         let mut first = super::Deferred::default();
@@ -2223,6 +2253,10 @@ struct CardPlan {
     lists: Vec<(bool, Prelude)>,
     sent_as: u64,
     capture: Option<usize>,
+    /// (M1LK Pour) The plans of the submission's chunks sent ahead of its
+    /// last (card syncs only: those chunks declare no writes), given back
+    /// with this one.
+    poured: Vec<CardPlan>,
 }
 
 /// One piece of submission-time work, in recorded order.
@@ -3169,6 +3203,103 @@ impl PendingWrites {
             join_ranges(&mut self.textures, textures.iter().copied());
         }
     }
+}
+
+/// M1LK Pour: a submission's lists go to the card in chunks while the rest
+/// is still being prepared, so the card starts on the first lists instead of
+/// idling behind the whole preparation. `VICTORY_POUR=K`: a chunk every K
+/// runs at the earliest; unset or 0: off (one send per submission).
+fn pour() -> usize {
+    static K: OnceLock<usize> = OnceLock::new();
+    *K.get_or_init(|| {
+        let k = std::env::var("VICTORY_POUR").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+        if k > 0 {
+            tracing::info!("M1LK Pour: on, {k} runs per chunk");
+        } else {
+            tracing::info!("M1LK Pour: off");
+        }
+        k
+    })
+}
+
+/// `VICTORY_POUR_LOOSE=1`: chunks may also go ahead of later runs whose
+/// preparation writes title memory (buffer copies, steps of ours). Their
+/// refreshes then rewrite host copies that the chunk's lists may be reading
+/// on the card: the chunk sees the bytes from before the copy (the title's
+/// own order), or a mix. Off by default.
+fn pour_loose() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_POUR_LOOSE").is_some_and(|v| v == "1"))
+}
+
+/// What [`pour_cuts`] needs to know of a run.
+#[derive(Clone, Copy, Default)]
+struct PourRun {
+    /// Its lists write something the CPU reads back, compares or refreshes
+    /// around (declared shader writes, read-backs, texture read-backs,
+    /// bottom-of-pipe writes).
+    writes: bool,
+    /// Its preparation writes title memory (`Step::Copy`, `Step::Run`).
+    title_writes: bool,
+    /// The list (a submission may name one twice).
+    key: usize,
+}
+
+impl PourRun {
+    fn of(list: &HostList) -> PourRun {
+        let deferred = list.deferred();
+        let mut run = PourRun {
+            writes: !deferred.backs.is_empty() || !deferred.texture_backs.is_empty() || !deferred.writes.is_empty(),
+            title_writes: false,
+            key: std::ptr::from_ref(list) as usize,
+        };
+        for step in &deferred.copies {
+            match step {
+                Step::GpuWrite(..) => run.writes = true,
+                Step::Copy(..) | Step::Run(_) => run.title_writes = true,
+                _ => {}
+            }
+        }
+        run
+    }
+}
+
+/// (M1LK Pour) Where a submission of `runs` is cut: the ends (exclusive) of
+/// the chunks sent ahead of its last. A chunk has at least `k` runs, and
+/// ends only where sending it early changes nothing the CPU sees:
+/// - it writes nothing (no declared shader writes, read-backs, bottom-of-pipe
+///   writes): so no snapshot, compare, copy-back or card check of it is
+///   taken after it ran, and no later refresh can overwrite what it wrote;
+/// - no later run names one of its lists (a list's own upload memory is
+///   filled again when it is prepared again);
+/// - unless `loose`, no later run's preparation writes title memory (whose
+///   refreshes would rewrite host copies the chunk may be reading).
+///
+/// Where these do not hold the chunk grows; a chunk that writes ends the
+/// cutting (all later runs go with the last send).
+fn pour_cuts(runs: &[PourRun], k: usize, loose: bool) -> Vec<usize> {
+    let mut cuts = Vec::new();
+    if k == 0 || runs.len() <= k {
+        return cuts;
+    }
+    // Cuts only after the last run that writes title memory.
+    let last_title_write = if loose { None } else { runs.iter().rposition(|r| r.title_writes) };
+    let mut start = 0;
+    for end in 1..runs.len() {
+        let head = &runs[start..end];
+        if head.last().is_some_and(|r| r.writes) {
+            break;
+        }
+        if end - start < k || last_title_write.is_some_and(|at| at >= end) {
+            continue;
+        }
+        if runs[end..].iter().any(|later| head.iter().any(|r| r.key == later.key)) {
+            continue;
+        }
+        cuts.push(end);
+        start = end;
+    }
+    cuts
 }
 
 /// The first list whose CPU preparation would read a texture that an
@@ -4656,6 +4787,7 @@ impl Host {
             lists: used,
             sent_as,
             capture: None,
+            poured: Vec::new(),
         };
         // Each byte once, as the copy-back joins the declared ranges. The
         // results go behind those of plans still in the air.
@@ -4763,7 +4895,10 @@ impl Host {
     /// ([`Host::card_back`]): its lists are free for the next plan. Called
     /// when nothing of ours is on the card, so the compare's results start
     /// from the beginning again.
-    fn card_done(&self, plan: CardPlan) {
+    fn card_done(&self, mut plan: CardPlan) {
+        for poured in std::mem::take(&mut plan.poured) {
+            self.card_done(poured);
+        }
         let mut work = CARD_WORK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(work) = work.as_mut() else {
             return;
@@ -5768,12 +5903,28 @@ impl Host {
             settled += settling.elapsed();
         }
         let parallel = parallel_preludes(runs);
+        let flown = late && relay();
+        // (M1LK Pour) The chunks sent ahead of the last ([`pour_cuts`]).
+        // Not with each list timed on its own (diagnostics).
+        #[cfg(feature = "diagnostics")]
+        let k = if timing() { 0 } else { pour() };
+        #[cfg(not(feature = "diagnostics"))]
+        let k = pour();
+        let cuts = if k > 0 && runs.len() > k {
+            let facts: Vec<PourRun> = runs.iter().map(|list| PourRun::of(list)).collect();
+            pour_cuts(&facts, k, pour_loose())
+        } else {
+            Vec::new()
+        };
+        let mut cuts = cuts.into_iter().peekable();
+        let mut chunk_start = 0;
+        let mut poured_cards: Vec<CardPlan> = Vec::new();
         let mut plans = Vec::new();
         let mut texture_uploads = Vec::new();
         let mut replay_preludes = Vec::new();
         let mut seen_preludes = std::collections::HashSet::new();
         let mut sparse_limit = None;
-        for list in runs {
+        for (index, list) in runs.iter().enumerate() {
             let mut uploads = list.run_deferred(&mut batch);
             let prelude_began = crate::prof::on().then(std::time::Instant::now);
             uploads.retain_mut(|upload| {
@@ -5803,6 +5954,38 @@ impl Host {
             if let Some(since) = prelude_began {
                 crate::prof::lap(crate::prof::S::Preludes, since);
             }
+            if cuts.next_if_eq(&(index + 1)).is_some() {
+                // (M1LK Pour) This chunk goes now, unsignalled: its preludes
+                // recorded, its refreshes and texture checks done, snapshots
+                // taken, the card's copies brought up to date for it (it
+                // declares no writes: a sync, no compare), all before its
+                // lists. The fence is signalled once, behind the last chunk.
+                let head = &runs[chunk_start..=index];
+                chunk_start = index + 1;
+                let prelude_began = crate::prof::on().then(std::time::Instant::now);
+                record_preludes(std::mem::take(&mut plans));
+                if let Some(since) = prelude_began {
+                    crate::prof::lap(crate::prof::S::Preludes, since);
+                }
+                batch.check_textures();
+                batch.flush();
+                let snap_lap = std::time::Instant::now();
+                crate::shadow::take_snapshots();
+                crate::prof::lap(crate::prof::S::Snapshots, snap_lap);
+                let card_began = std::time::Instant::now();
+                let card = self.card_before(head, flown);
+                crate::prof::lap(crate::prof::S::CardBefore, card_began);
+                if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
+                    lists.push(Some(check));
+                }
+                let execute_began = std::time::Instant::now();
+                self.execute_lists(&lists, true);
+                self.card_sent();
+                crate::prof::lap(crate::prof::S::Execute, execute_began);
+                lists.clear();
+                poured_cards.extend(card);
+                crate::prof::count(crate::prof::C::PourChunks, 1);
+            }
         }
         // Only the recording runs concurrently. The GPU receives the
         // original ordered list array, after every worker has closed its list.
@@ -5829,14 +6012,28 @@ impl Host {
         // Copies in the card's memory: what changed on their CPU side goes
         // up ahead of the lists, and a compare of what the shaders may
         // write follows them in the same submission.
-        let flown = late && relay();
         if flown && self.card_results_low() {
             let settling = std::time::Instant::now();
             self.settle(&mut submitted, WHY_MOST);
             settled += settling.elapsed();
         }
         let card_began = std::time::Instant::now();
-        let card = self.card_before(runs, flown);
+        // The chunks sent ahead declared no writes: the last chunk's are the
+        // submission's.
+        let card = self.card_before(&runs[chunk_start..], flown);
+        let card = if poured_cards.is_empty() {
+            card
+        } else if let Some(mut card) = card {
+            card.poured = poured_cards;
+            Some(card)
+        } else {
+            // The latest numbered of the chunks' plans carries the others.
+            let mut carrier = poured_cards.pop();
+            if let Some(carrier) = carrier.as_mut() {
+                carrier.poured = poured_cards;
+            }
+            carrier
+        };
         crate::prof::lap(crate::prof::S::CardBefore, card_began);
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
