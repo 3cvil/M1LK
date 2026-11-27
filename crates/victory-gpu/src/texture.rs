@@ -96,6 +96,10 @@ macro_rules! once {
 /// texture's subresources, and what was last detiled.
 pub(crate) struct Staging {
     inline: OnceLock<upload::Upload>,
+    /// Detiled on the card for sampled copies (`crate::gpudetile`,
+    /// `VICTORY_GPU_DETILE`): the raw layout and the dispatches; the
+    /// inline (record-time) uploads are detiled on the PC as ever.
+    gpu: Option<GpuPlan>,
     /// Its bytes.
     #[cfg(feature = "diagnostics")]
     total: u64,
@@ -123,6 +127,29 @@ pub(crate) struct Staging {
     uploaded: std::sync::atomic::AtomicBool,
     /// When a list last recorded a use of it (`crate::host::moment`).
     used: std::sync::atomic::AtomicU64,
+}
+
+/// The card's way for a texture's sampled copies.
+struct GpuPlan {
+    raw: crate::gpudetile::Raw,
+    jobs: Vec<crate::gpudetile::Job>,
+}
+
+/// Since the last frame-rate line, of detiling on the PC: the time it took
+/// (microseconds, all threads), the bytes of title memory detiled, the
+/// textures.
+pub(crate) static DETILED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+/// Since the last frame-rate line: the bytes detiled either way, by
+/// swizzle mode (`victory_formats::texture::Swizzle` numbers 0 to 27).
+pub(crate) static BY_MODE: [std::sync::atomic::AtomicU64; 28] = [const { std::sync::atomic::AtomicU64::new(0) }; 28];
+
+/// Adds the time since its start to [`DETILED`] when dropped.
+struct DetileTimed(std::time::Instant);
+
+impl Drop for DetileTimed {
+    fn drop(&mut self) {
+        DETILED[0].fetch_add(self.0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// A sampled texture copy and the exact staging revision it reads. Both
@@ -180,6 +207,7 @@ impl StagedCopy {
     }
 
     pub(crate) fn submitted(&self, fence: u64) {
+        self.upload.gpu_submitted();
         if let Some(sparse) = &self.texture.sparse {
             sparse.submitted(fence, self.first);
             let mut last = self.staging.last.lock().unwrap_or_else(|e| e.into_inner());
@@ -193,6 +221,16 @@ impl StagedCopy {
     }
 
     pub(crate) fn record(&self, list: &ID3D12GraphicsCommandList) {
+        // On the card's way: the detiling of this revision, before the
+        // copies read it (once it has gone out in a submission, the
+        // buffer holds it until the revision changes).
+        if let (Some(gpu), Some(linear), Some(detiler)) =
+            (&self.staging.gpu, self.upload.gpu_pending(), crate::gpudetile::detiler())
+        {
+            crate::gpudetile::record(list, detiler, self.upload.raw(), linear, &gpu.jobs);
+            crate::gpudetile::STATS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::gpudetile::STATS[1].fetch_add(gpu.jobs.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         for (i, footprint) in self.staging.footprints.iter().enumerate() {
             if self.staging.part(i).0 < self.first {
                 continue;
@@ -1250,7 +1288,8 @@ impl Staging {
         if sampled {
             if let Some(upload) = last.sampled.as_mut().and_then(Arc::get_mut) {
                 // Reuse the slot only after all queue references are gone.
-                if !self.detile_into(tiled, upload.data()) {
+                upload.gpu_changed();
+                if !self.detile_into(tiled, upload) {
                     last.sampled = None;
                     last.sparse_copies = Default::default();
                     last.has_data = last.inline_current;
@@ -1258,8 +1297,8 @@ impl Staging {
                     return false;
                 }
             } else {
-                let Some(upload) = host().and_then(|host| upload::Upload::new(host, self.bytes)) else { return false };
-                if !self.detile_into(tiled, upload.data()) {
+                let Some(upload) = self.new_sampled_upload() else { return false };
+                if !self.detile_into(tiled, &upload) {
                     return false;
                 }
                 last.sampled = Some(Arc::new(upload));
@@ -1267,7 +1306,7 @@ impl Staging {
             last.inline_current = false;
         } else {
             let Some(upload) = self.inline_upload() else { return false };
-            if !self.detile_into(tiled, upload.data()) {
+            if !self.detile_into(tiled, upload) {
                 last.inline_current = false;
                 last.has_data = last.sampled.is_some();
                 return false;
@@ -1282,7 +1321,47 @@ impl Staging {
         true
     }
 
-    fn detile_into(&self, tiled: &[u8], data: *mut u8) -> bool {
+    /// A new upload for a sampled revision: on the card's way if the
+    /// texture has one and the card's buffers can be made, else a slot.
+    fn new_sampled_upload(&self) -> Option<upload::Upload> {
+        let host = host()?;
+        if let Some(gpu) = &self.gpu {
+            if let Some(upload) = upload::Upload::new_gpu(host, gpu.raw.bytes, self.bytes) {
+                // SAFETY: a buffer of at least `raw.bytes` nothing else holds.
+                unsafe { crate::gpudetile::write_tables(&self.layout, &gpu.raw, upload.data()) };
+                return Some(upload);
+            }
+        }
+        upload::Upload::new(host, self.bytes)
+    }
+
+    fn detile_into(&self, tiled: &[u8], upload: &upload::Upload) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let started = std::time::Instant::now();
+        let size = (self.layout.size as usize).min(tiled.len());
+        if let Some(mode) = BY_MODE.get(self.layout.desc.swizzle.0 as usize) {
+            mode.fetch_add(size as u64, Relaxed);
+        }
+        let data = upload.data();
+        if let (Some(gpu), true) = (&self.gpu, upload.is_gpu()) {
+            // The card's way: the bytes as they are; the shader does the rest.
+            // SAFETY: the raw buffer holds `gpu.raw.bytes` (the layout's size,
+            // then the mask and the tables), written only here, with no
+            // queue reference to the upload.
+            unsafe {
+                std::ptr::copy_nonoverlapping(tiled.as_ptr(), data, size);
+                let end = (self.layout.size as usize).min(gpu.raw.mask_at as usize);
+                if size < end {
+                    data.add(size).write_bytes(0, end - size);
+                }
+            }
+            crate::gpudetile::STATS[2].fetch_add(size as u64, Relaxed);
+            crate::gpudetile::STATS[3].fetch_add(started.elapsed().as_micros() as u64, Relaxed);
+            return true;
+        }
+        DETILED[1].fetch_add(size as u64, Relaxed);
+        DETILED[2].fetch_add(1, Relaxed);
+        let _timed = DetileTimed(started);
         #[cfg(feature = "diagnostics")]
         if tiled.iter().all(|&b| b == 0) {
             tracing::debug!(
@@ -1683,8 +1762,29 @@ fn staging(resource: This, texture: &ID3D12Resource, first: u32) -> Option<Arc<S
     tracing::debug!(?desc, total, mip_drop, "texture contents uploaded from title memory");
     STAGED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     STAGED[1].fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    // On the card's way (`VICTORY_GPU_DETILE`) for the sampled copies, if
+    // every subresource can be detiled so.
+    let gpu = if crate::gpudetile::on() && crate::gpudetile::detiler().is_some() {
+        let raw = crate::gpudetile::raw_layout(&layout);
+        let mips_kept = mips - first;
+        let parts: Vec<(u32, u32)> =
+            (0..count).map(|i| (first + i % mips_kept, i / mips_kept)).collect();
+        match crate::gpudetile::jobs(&layout, &footprints, &rows, &parts, &raw) {
+            Some(jobs) => {
+                crate::gpudetile::STATS[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(GpuPlan { raw, jobs })
+            }
+            None => {
+                crate::gpudetile::STATS[5].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let s = Arc::new(Staging {
         inline: OnceLock::new(),
+        gpu,
         #[cfg(feature = "diagnostics")]
         total,
         footprints,
