@@ -20,15 +20,15 @@ GDK / XGameRuntime platform services and the `d3d12_xs` graphics API on top of d
 ## Progress
 
 All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, an i5-12500H CPU and
-16 GB of RAM, on Windows 11. Each run uses the Series X profile.
+16 GB of RAM, on Windows 11. Runs now use the Series S profile (smaller title memory budget). The test log below is filled in automatically after every test run.
 
 | Goal | Status |
 | --- | --- |
 | 1. Boot to the first loaded scene | Done. Menus, the intro and the first cutscene load and draw. |
-| 2. Peak memory 13 GB or less | **In progress.** Peak 21.6 GB on Series X. New savers, now being tested: title windows in VRAM (needs Resizable BAR), constants ported to the card, and 2 MB memory sections. Series S (the title budgets 7.8 GB instead of 13.5 GB) is the next big lever. Series S now runs with a picture and menus: **17.1 GB peak and 4.5 fps median**, against 21.3 GB and 3.5 fps on Series X. |
-| 3. Stable for 30 minutes | **Close.** The latest run lasted the full 20-minute test with no crash (earlier runs: 5 min 46 s, then 10 min 19 s). |
+| 2. Peak memory 13 GB or less | **In progress.** Series S peaks at **16.4-16.9 GB** (Series X 21.3 GB). On a 16 GB laptop free RAM drops to almost nothing, which costs fps. Next: keeping title memory in place instead of copying it (`VICTORY_INPLACE`) and fixing the constants port, which turned out to place nothing yet. |
+| 3. Stable for 30 minutes | **Close.** Every recent run lasted its full 15-20 minute test with no crash. A 40-minute soak is next. |
 | 4. Full ray tracing on NVIDIA | BVH builder and wave32 fixes are merged. It will be measured once in-game fps is about 5 or more (shadows, then reflections, then full GI). |
-| 5. 30 fps with ray tracing | Not yet. Menus run at 30 fps; in game, without RT, the median is 0.5 fps because about 80% of each frame is spent waiting on memory paging. The merged build has DLSS Super Resolution, P-core thread placement and a frame-interval switch ready to measure. Frame generation numbers will always be reported next to real fps. |
+| 5. 30 fps with ray tracing | Not yet. In game, without RT: **about 4-5 fps** (5.1 fps median while walking). The graphics card is busy only about 7% of each frame; the rest is CPU-side copying of title memory and waiting on submissions, so that is what we are cutting next. Frame generation numbers will always be reported next to real fps. |
 
 ### Test log
 
@@ -44,6 +44,9 @@ All numbers come from the reference machine: an RTX 4060 Laptop GPU with 8 GB, a
 | 2026-11-26 | Series S fix | Series S, `--no-rt`, 8 min | **No device removal** (it used to happen at about 2.5 min). The shared-exponent target uses its stand-in format, and the run reached 7 min 48 s at 5.4 fps while the scene was still loading. |
 | 2026-11-26 | Series S fix | Series S, `--no-rt`, 15 min with play | Stable, **median 5.3 fps, peak 17.3 GB**, but the picture was black in game and the menus were missing. |
 | 2026-11-26 | Series S picture fix | Series S, `--no-rt`, 15 min with play | **Picture and pause menu show.** Median 4.5 fps, peak 17.1 GB, no crash. The scene is as dark as on Series X (lighting without ray tracing). |
+| 2026-11-27 | + ambient light stand-in, title's own upscaler | Series S, `--no-rt`, `VICTORY_UPSCALER=6`, 15 min with play | Median 4.6 fps, peak 16.4 GB, no crash. Rooms are still very dark. Found later: floating white blocks and orange speckles in one outdoor scene (Series S only; being fixed). |
+| 2026-11-27 | same build, repeat | as above | Standing 3.9 fps, **walking 5.1 fps** (low 4.3), peak 16.9 GB, no crash. Same white blocks and speckles. Free RAM fell to 45 MB during the run. |
+| 2026-11-27 | DLSS fix, copy changes, fork fixes | Series S | Not valid: these test builds were made without the scripted-input feature, so they waited at a menu. Being re-run with the right build. |
 
 This table is updated after every test run.
 
@@ -51,7 +54,7 @@ This table is updated after every test run.
 
 Newest first. Each bullet is a step that changed what M1LK does or what it measured.
 
-- **2026-11-27:** **Lighting stand-in and the title's own upscaler (opt-in).** Without ray tracing the title's screen-probe lighting comes out empty, so scenes were near black. A new ambient pass fills it with a soft constant light and halves reflections (`VICTORY_AMBIENT=<level>|sky|off`; ported from another VIctory fork). Console upscaler shaders that carry another compiler's code (`ACCC` containers) can now be translated, including both wave64 halves (ported from two other forks); `VICTORY_UPSCALER=title` uses them instead of the spatial stand-in, `VICTORY_ACCC=0` turns the translation off. `VICTORY_UPSCALER=dlss` on Series S no longer asks for the Series X-only 4K preset. DLSS itself still crashes in NVIDIA's NGX core at start-up on our test machine; a fix is being worked on, so leave it off for now.
+- **2026-11-27:** **Lighting stand-in and the title's own upscaler (opt-in).** Without ray tracing the title's screen-probe lighting comes out empty, so scenes were near black. A new ambient pass fills it with a soft constant light and halves reflections (`VICTORY_AMBIENT=<level>|sky|off`; ported from another VIctory fork). Console upscaler shaders that carry another compiler's code (`ACCC` containers) can now be translated, including both wave64 halves (ported from two other forks); `VICTORY_UPSCALER=6` uses them instead of the spatial stand-in, `VICTORY_ACCC=0` turns the translation off. `VICTORY_UPSCALER=dlss` on Series S no longer asks for the Series X-only 4K preset. DLSS itself still crashes in NVIDIA's NGX core at start-up on our test machine; a fix is being worked on, so leave it off for now.
 - **2026-11-26:** **Series S shows a picture.** Two causes. First, on Series S the title renders at 1280x720 and runs its own console upscaler, whose shaders are console machine code that M1LK can't translate yet, so the upscaled image was never written. Series S now defaults to M1LK's spatial upscaler (`VICTORY_UPSCALER` overrides it). Second, the Series S present has two planes, the scene and the interface. M1LK now composites both, reading the plane records at their 72-byte stride (`VICTORY_PLANES=0` turns this off). Both are ported from other VIctory forks (cool_fox, cgbj, mandy-port). Result: **17.1 GB peak, 4.5 fps median**, against 21.3 GB and 3.5 fps on Series X.
 - **2026-11-26:** **Series S no longer crashes.** The title asks for a full-screen render target in a packed HDR format (R9G9B9E5) that NVIDIA can't draw into. M1LK now uses a same-size format that NVIDIA supports (R11G11B10), but only when the card reports the original as unsupported, so AMD is unchanged (`VICTORY_RGB9E5_HOST=0` restores the old behaviour). A render-target format that can't be drawn into now drops its draws instead of removing the device. Also: rectangle clears are sent in batches of 16 (NVIDIA's driver can abort at 64; from VItoria-Shyro / Belobug), and the test runner copies the full run log.
 - **2026-11-26:** new build. Hair strands are left out (no more black smudges), and menu/loading art keeps full resolution. Unchanged memory copies are skipped (about 3,400 a frame). The heap rescan is spread over 16 frames, and texture read-backs run on their own thread. Groupshared memory is guarded for 32-lane NVIDIA waves. **The worst quarter of frames went from 0.7 to 3.0 fps.** The test runner gained short (8 min), quick (15 min), full and soak (40 min) kinds.
@@ -83,7 +86,7 @@ Everything here is opt-in unless marked as a default, so the upstream (including
 | Stability | `VICTORY_NO_WATCHDOG` (on by default in the launcher) | Byte-checked patch that stops the title's watchdog from killing a slow frame. From VItoria-Spark. |
 | RAM | `VICTORY_RAM_SWEEP` (default on), `VICTORY_WINDOW_BUDGET_MB`, `VICTORY_RAM_TRIM_MB` | Lets go of host copies that only the title still holds, and trims the working set under pressure. |
 | RAM | `VICTORY_WINDOWS_BAR_MB=1536`, `VICTORY_WINDOWS_BAR_FREE_MB=512` | Puts title windows in card memory the CPU writes directly (Resizable BAR), instead of locked system RAM. |
-| RAM | `VICTORY_PORT_CONSTANTS=1` | Constant buffers stay on the card (about 170 MB and about 6,000 fills a frame less). From cool_fox. |
+| RAM | `VICTORY_PORT_CONSTANTS=1` | Meant to keep constant buffers on the card (about 170 MB). **Not effective yet:** our logs show it places nothing (`0 regions in place`) because a follow-up fix from cool_fox is still missing. |
 | RAM | `VICTORY_SECTION_MB=2` | Physical memory in 2 MB sections (faster remaps). From ApexIV. |
 | RAM / picture | `VICTORY_TEXTURE_MIP_DROP`, `_MIN_SIZE`, `_FLOOR`, `VICTORY_TEXTURE_MIP_CAP` | Drops the top texture levels to save memory. A temporary trade: it makes surfaces softer. |
 | fps | `VICTORY_UPSCALER=dlss`, `VICTORY_DLSS=quality\|balanced\|performance` | DLSS Super Resolution in place of the title's FSR. NVIDIA's DLL is loaded at runtime from your own driver and a `dlss` folder; M1LK ships no NVIDIA code (see `docs/dlss.md` and `tools/Setup-Dlss.ps1`). |
