@@ -234,6 +234,40 @@ fn windows() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_INDIRECT_WINDOW").is_some_and(|v| v == "1"))
 }
 
+/// `VICTORY_HEAP_PASS_ASYNC=1`: the heap buffer pass is claimed by one
+/// thread per frame without a lock; the other recording threads return at
+/// once instead of waiting for the winner's resolve loop (they only need the
+/// stride table address, and a loser already returned before the winner's
+/// refresh was recorded). Off by default.
+fn heap_pass_async() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_HEAP_PASS_ASYNC").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!("M1LK Churn: heap pass async on");
+        }
+        on
+    })
+}
+
+/// Claims the heap pass of `frame` in `slot` (which holds the newest claimed
+/// frame plus one, 0 for none): true for the one caller that moves it
+/// forward, false for every caller that finds `frame` (or a newer one)
+/// already claimed.
+fn claim_heap_pass(slot: &AtomicU64, frame: u64) -> bool {
+    let want = frame.saturating_add(1);
+    let mut seen = slot.load(Ordering::Acquire);
+    loop {
+        if seen >= want {
+            return false;
+        }
+        match slot.compare_exchange_weak(seen, want, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(now) => seen = now,
+        }
+    }
+}
+
 /// What one title list has set, and what its host list was last given.
 #[derive(Default)]
 pub(crate) struct State {
@@ -1690,6 +1724,9 @@ impl State {
         // shortcut: what the title writes into such buffers between lists
         // of one frame is seen a frame late.
         let frame = crate::frame::current();
+        if heap_pass_async() && !claim_heap_pass(&host.heap_pass_claimed, frame) {
+            return Some(gpu);
+        }
         let mut pass = host.buffer_pass.lock().unwrap_or_else(|e| e.into_inner());
         if pass.frame == Some(frame) {
             return Some(gpu);
@@ -4315,6 +4352,27 @@ fn heap_rescan_slices() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heap_pass_claim_goes_to_one_thread_per_frame() {
+        let slot = AtomicU64::new(0);
+        assert!(claim_heap_pass(&slot, 0));
+        assert!(!claim_heap_pass(&slot, 0));
+        assert!(claim_heap_pass(&slot, 5));
+        assert!(!claim_heap_pass(&slot, 5));
+        assert!(!claim_heap_pass(&slot, 3));
+        let slot = std::sync::Arc::new(AtomicU64::new(0));
+        let wins: usize = (0..8)
+            .map(|_| {
+                let slot = slot.clone();
+                std::thread::spawn(move || claim_heap_pass(&slot, 9))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| usize::from(t.join().unwrap()))
+            .sum();
+        assert_eq!(wins, 1);
+    }
 
     #[test]
     fn raw_address_candidates_use_only_the_current_stages_constants() {

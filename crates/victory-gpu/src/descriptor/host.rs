@@ -81,6 +81,9 @@ pub(crate) struct HostHeap {
     /// [`HostHeap::buffer_changes`] last took them.
     changed: Mutex<std::collections::HashSet<u32>>,
     pub(crate) buffer_pass: Mutex<BufferPass>,
+    /// `VICTORY_HEAP_PASS_ASYNC=1`: the newest frame (plus one; 0 none) whose
+    /// heap pass a thread has claimed, so the others skip the lock.
+    pub(crate) heap_pass_claimed: std::sync::atomic::AtomicU64,
     /// Title slots holding a view of a texture the title may fill itself (a
     /// placed texture, a texture object), with the frame from which they
     /// are due: such a texture is uploaded when a draw reads it through a
@@ -1132,6 +1135,7 @@ impl HostHeap {
             buffers: Mutex::default(),
             changed: Mutex::default(),
             buffer_pass: Mutex::default(),
+            heap_pass_claimed: std::sync::atomic::AtomicU64::new(0),
             textures: Mutex::default(),
             texture_sweep: Mutex::default(),
             material_demand: Default::default(),
