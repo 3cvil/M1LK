@@ -335,6 +335,69 @@ impl State {
     }
 }
 
+/// (M1LK Churn) `VICTORY_TABLE_CACHE=1`: the table keys of [`State::tables`] are hashed with a
+/// folded-multiply mix over the record words instead of SipHash. The key is the same
+/// information (table, slot count, the words of each record); only the hash differs.
+/// Descriptors and constants are made exactly as before: a table reused within a list still
+/// has its constants copied at the list's submission, and nothing is kept across lists
+/// (their upload memory and dynamic slots go back at the submission).
+pub(crate) fn table_cache_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("VICTORY_TABLE_CACHE").is_ok_and(|v| v.trim() == "1");
+        if on {
+            tracing::info!("M1LK Churn: table cache on (folded-multiply table keys)");
+        }
+        on
+    })
+}
+
+/// The hash of a table's record words: either the fast mix or SipHash (the old behaviour).
+pub(crate) enum TableHash {
+    Fast(u64),
+    Sip(std::collections::hash_map::DefaultHasher),
+}
+
+impl TableHash {
+    pub(crate) fn new() -> Self {
+        Self::Fast(0x9e37_79b9_7f4a_7c15)
+    }
+
+    pub(crate) fn sip() -> Self {
+        Self::Sip(std::collections::hash_map::DefaultHasher::new())
+    }
+
+    #[inline]
+    pub(crate) fn words(&mut self, w: [u32; 3]) {
+        match self {
+            Self::Fast(h) => {
+                let a = u64::from(w[0]) | u64::from(w[1]) << 32;
+                let b = u64::from(w[2]) ^ 0xa076_1d64_78bd_642f;
+                // Folded 64x64 -> 128 multiply, as wyhash mixes.
+                let m = u128::from(a ^ *h ^ 0xe703_7ed1_a0b4_28db) * u128::from(b ^ 0x8ebc_6af0_9c88_c6e3);
+                *h = (m as u64) ^ ((m >> 64) as u64);
+            }
+            Self::Sip(s) => {
+                use std::hash::Hash;
+                w.hash(s);
+            }
+        }
+    }
+
+    pub(crate) fn finish(self) -> u64 {
+        match self {
+            Self::Fast(h) => {
+                let m = u128::from(h ^ 0x1d8e_4e27_c47d_124f) * u128::from(0x9e37_79b9_7f4a_7c15_u64);
+                (m as u64) ^ ((m >> 64) as u64)
+            }
+            Self::Sip(s) => {
+                use std::hash::Hasher;
+                s.finish()
+            }
+        }
+    }
+}
+
 /// An experiment on the title's scissor rectangles (`VICTORY_SCISSOR_TEST=full`):
 /// they are all widened to the whole target. The title's room at
 /// the start of the prologue lost its walls in five runs of seven, and in
@@ -3188,12 +3251,16 @@ impl State {
             }
             // The table and what its entries hold (record words).
             let key = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
+                let mut h = if table_cache_on() {
+                    TableHash::new()
+                } else {
+                    TableHash::sip()
+                };
                 for k in 0..n {
                     let at = table + u64::from(k) * 32;
                     // SAFETY: a descriptor slot in title memory.
-                    unsafe { (at as *const [u32; 3]).read_unaligned() }.hash(&mut h);
+                    let words = unsafe { (at as *const [u32; 3]).read_unaligned() };
+                    h.words(words);
                 }
                 (table, n, h.finish())
             };
@@ -4315,6 +4382,27 @@ fn heap_rescan_slices() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_hash_is_stable_and_discriminating() {
+        let h = |recs: &[[u32; 3]]| {
+            let mut t = TableHash::new();
+            recs.iter().for_each(|r| t.words(*r));
+            t.finish()
+        };
+        assert_eq!(h(&[[1, 2, 3], [4, 5, 6]]), h(&[[1, 2, 3], [4, 5, 6]]));
+        assert_ne!(h(&[[1, 2, 3], [4, 5, 6]]), h(&[[4, 5, 6], [1, 2, 3]]));
+        assert_ne!(h(&[[1, 2, 3]]), h(&[[1, 2, 4]]));
+        assert_ne!(h(&[[1, 2, 3]]), h(&[[1, 2, 3], [0, 0, 0]]));
+        assert_ne!(h(&[[0, 0, 0]]), h(&[]));
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..20_000u32 {
+            assert!(seen.insert(h(&[[i, i.rotate_left(7), i ^ 0x5555]])));
+        }
+        let mut s = TableHash::sip();
+        s.words([1, 2, 3]);
+        let _ = s.finish();
+    }
 
     #[test]
     fn raw_address_candidates_use_only_the_current_stages_constants() {
