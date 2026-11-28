@@ -62,7 +62,7 @@ fn most() -> usize {
 
 /// Whether `frame` is one of the sampled ones (one in `every`; 0 and 1 mean all).
 pub(crate) fn sampled_frame(frame: u64, every: u64) -> bool {
-    every <= 1 || frame % every == 0
+    every <= 1 || frame.is_multiple_of(every)
 }
 
 /// `VICTORY_CHURN_CLOCK=1` with the submit profiler on.
