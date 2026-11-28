@@ -135,5 +135,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 106 | 2026-11-28 | GPU-bound test baseline (shader loops=32): host_exec+fps | 1.4 | 4.5 | 17.3 | 133 | unchecked | 41* | [chart](test-106.svg) |
 | 107 | 2026-11-28 | * GPU-bound TEST: shader loops=4 (slash GPU shader work). host_exec d... | 1.5 | 4.3 | 16.4 | 132 | unchecked | 44* | [chart](test-107.svg) |
 | 108 | 2026-11-28 | GPU-bound test milder (shader loops=16): host_exec drop + fps change... | 1.6 | 3.5 | 16.4 | 142 | unchecked | 43* | [chart](test-108.svg) |
+| 109 | 2026-11-28 | round 7: landed command lists reset on the helper thread instead of i... | 0.1 | 0.1 | 16.8 | 184 | unchecked | 30* | [chart](test-109.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
