@@ -157,5 +157,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 128 | 2026-11-28 | * A-vs-B: present-thread wait classify (fence_gpu vs fence_cpu/other/... | 2.2 | 4.2 | 15.6 | 138 | unchecked | 43* | [chart](test-128.svg) |
 | 129 | 2026-11-28 | * A-vs-B: present-thread wait classify (fence_gpu vs fence_cpu/other/... | 1.4 | 3.3 | 15.7 | 129 | unchecked | 43* | [chart](test-129.svg) |
 | 130 | 2026-11-28 | * FINAL DIAG: what handle does present thread wait on - ours(pipeline... | 1.7 | 3.8 | 15.5 | 149 | unchecked | 43* | [chart](test-130.svg) |
+| 131 | 2026-11-28 | * FINAL DIAG: what handle does present thread wait on - ours(pipeline... | 1.8 | 3.1 | 15.6 | 141 | unchecked | 42* | [chart](test-131.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
