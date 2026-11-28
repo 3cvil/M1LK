@@ -426,26 +426,63 @@ fn record_clamp_as(
     let waits = crate::copystat::barrier_test() & 2 == 0;
     #[cfg(not(feature = "diagnostics"))]
     let waits = true;
-    let first = [
-        uav_barrier(),
-        transition(
+    let local = local_barriers();
+    let first: Vec<D3D12_RESOURCE_BARRIER> = if local {
+        // Scoped: the earlier writes that matter are to what the clamp reads.
+        let mut v = Vec::with_capacity(3);
+        if waits {
+            v.push(uav_barrier_on(Some(src)));
+            if let Some((buf, _)) = count {
+                if buf != src {
+                    v.push(uav_barrier_on(Some(buf)));
+                }
+            }
+        }
+        v.push(transition(
             dst,
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        ),
-    ];
-    let second = [
-        uav_barrier(),
-        transition(
+        ));
+        v
+    } else {
+        let all = [
+            uav_barrier(),
+            transition(
+                dst,
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            ),
+        ];
+        all[usize::from(!waits)..].to_vec()
+    };
+    let second: Vec<D3D12_RESOURCE_BARRIER> = if local {
+        // Scoped: the clamp's writes to `dst` (the transition after also
+        // makes them visible) and its reads of `src` before any later write.
+        let mut v = Vec::with_capacity(3);
+        if waits {
+            v.push(uav_barrier_on(Some(dst)));
+            v.push(uav_barrier_on(Some(src)));
+        }
+        v.push(transition(
             dst,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
-        ),
-    ];
-    let skip = usize::from(!waits);
+        ));
+        v
+    } else {
+        let all = [
+            uav_barrier(),
+            transition(
+                dst,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            ),
+        ];
+        all[usize::from(!waits)..].to_vec()
+    };
     unsafe {
         // Earlier shader writes (the title's argument and count passes) first.
-        l.ResourceBarrier(&first[skip..]);
+        l.ResourceBarrier(&first);
         if records > 0 {
             l.SetComputeRootSignature(&c.root);
             l.SetPipelineState(&c.pso);
@@ -456,7 +493,7 @@ fn record_clamp_as(
             l.SetComputeRootUnorderedAccessView(4, budget);
             l.Dispatch(records.div_ceil(64), 1, 1);
         }
-        l.ResourceBarrier(&second[skip..]);
+        l.ResourceBarrier(&second);
     }
     true
 }
@@ -476,6 +513,36 @@ fn done_on(list: &ID3D12GraphicsCommandList, scratch: &ID3D12Resource) {
             D3D12_RESOURCE_STATE_COMMON,
         )])
     };
+}
+
+/// Whether the clamp's waits are scoped to the buffers it touches instead of
+/// every unordered access (`VICTORY_CLAMP_LOCAL_BARRIER=1`; off by default).
+fn local_barriers() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_CLAMP_LOCAL_BARRIER").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!("M1LK Churn: clamp local barriers on");
+        }
+        on
+    })
+}
+
+/// A UAV barrier on `resource` only (`None`: every unordered access).
+/// The barrier borrows the pointer and never releases it.
+fn uav_barrier_on(resource: Option<&ID3D12Resource>) -> D3D12_RESOURCE_BARRIER {
+    D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                // SAFETY: a borrowed pointer; the barrier never releases it.
+                pResource: std::mem::ManuallyDrop::new(resource.map(|r| unsafe {
+                    std::mem::transmute_copy::<ID3D12Resource, ID3D12Resource>(r)
+                })),
+            }),
+        },
+    }
 }
 
 fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
