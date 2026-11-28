@@ -154,6 +154,7 @@ impl Drop for Scope {
         let own = exclusive(whole, inner);
         NS[self.bucket as usize].fetch_add(own, Relaxed);
         crate::prof::crit_record(own);
+        crate::waitlog::ours_add(own);
         // For the scope outside this one, all of this is a child's time.
         CHILD.with(|c| c.set(self.outer_child.saturating_add(whole)));
     }

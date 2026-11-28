@@ -142,6 +142,18 @@ pub extern "system" fn CreateSemaphoreW(attributes: *const c_void, initial: i32,
     handle
 }
 
+pub extern "system" fn ReleaseSemaphore(semaphore: HANDLE, count: i32, previous: *mut i32) -> i32 {
+    waitlog::signal(semaphore as usize);
+    // SAFETY: forwarding the title's own arguments.
+    unsafe { windows_sys::Win32::System::Threading::ReleaseSemaphore(semaphore, count, previous) }
+}
+
+pub extern "system" fn SetEvent(event: HANDLE) -> i32 {
+    waitlog::signal(event as usize);
+    // SAFETY: forwarding the title's own argument.
+    unsafe { windows_sys::Win32::System::Threading::SetEvent(event) }
+}
+
 /// The wrappers, if the switch is on (none otherwise: the imports go to the host as before).
 pub(crate) fn module() -> HleModule {
     let exports: Vec<HleExport> = if waitlog::enabled() {
@@ -160,6 +172,8 @@ pub(crate) fn module() -> HleModule {
             hle_export!(CreateEventW),
             hle_export!(CreateEventExW),
             hle_export!(CreateSemaphoreW),
+            hle_export!(ReleaseSemaphore),
+            hle_export!(SetEvent),
         ]
     } else {
         Vec::new()

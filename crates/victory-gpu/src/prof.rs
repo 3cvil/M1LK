@@ -291,6 +291,10 @@ pub(crate) fn crit_record(ns: u64) {
 #[inline]
 fn bump(stage: S, us: u64) {
     US[stage as usize].fetch_add(us, Relaxed);
+    // Whole spans of our code that do not nest in each other (the rest nest in these).
+    if matches!(stage, S::Lines | S::Present) {
+        crate::waitlog::ours_add(us * 1000);
+    }
     if is_crit() {
         CRIT_US[stage as usize].fetch_add(us, Relaxed);
         if matches!(stage, S::Lines) && IN_PRESENT.with(std::cell::Cell::get) {

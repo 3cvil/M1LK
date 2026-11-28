@@ -94,6 +94,9 @@ pub fn note_fence(handle: usize) {
 /// The presenting thread waited `ns` in a wait of `kind` on `handle` (the first of its
 /// handles, or an address, or 0), called from `callers`.
 pub fn record(kind: Kind, handle: usize, ns: u64, callers: [usize; 3]) {
+    if matches!(kind, Kind::Single | Kind::Multiple) {
+        note_waited(handle);
+    }
     let new = with(|s| {
         let e = s.waits.entry((kind, handle)).or_default();
         e.ns += ns;
@@ -140,6 +143,165 @@ fn object_type(handle: usize) -> String {
     String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, chars) })
 }
 
+
+// ---- (M1LK Sig Source) who signals what the presenting thread waits on ----
+
+/// Per thread: the time it ran our translation code (recording, release_held, present) and
+/// the signals it sent to what the presenting thread waits on.
+pub(crate) struct ThreadStat {
+    tid: u32,
+    ours_ns: std::sync::atomic::AtomicU64,
+    signals: std::sync::atomic::AtomicU64,
+    signals_ours: std::sync::atomic::AtomicU64,
+    cpu_ns: std::sync::atomic::AtomicU64,
+}
+
+static THREADS: Mutex<Vec<&'static ThreadStat>> = Mutex::new(Vec::new());
+
+thread_local! {
+    static ME: std::cell::Cell<Option<&'static ThreadStat>> = const { std::cell::Cell::new(None) };
+    /// This thread's `ours_ns` at its last signal.
+    static LAST_OURS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn me() -> &'static ThreadStat {
+    ME.with(|m| {
+        if let Some(stat) = m.get() {
+            return stat;
+        }
+        // SAFETY: plain query.
+        let tid = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+        let stat: &'static ThreadStat = Box::leak(Box::new(ThreadStat {
+            tid,
+            ours_ns: Default::default(),
+            signals: Default::default(),
+            signals_ours: Default::default(),
+            cpu_ns: Default::default(),
+        }));
+        THREADS.lock().unwrap_or_else(|e| e.into_inner()).push(stat);
+        m.set(Some(stat));
+        stat
+    })
+}
+
+/// This thread ran `ns` of our translation code (not nested in other such time).
+#[inline]
+pub(crate) fn ours_add(ns: u64) {
+    if enabled() {
+        me().ours_ns.fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The handles the presenting thread has waited on (a fixed set, no lock).
+static WAITED: [std::sync::atomic::AtomicUsize; 32] = [const { std::sync::atomic::AtomicUsize::new(0) }; 32];
+
+fn note_waited(handle: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if handle == 0 {
+        return;
+    }
+    for slot in &WAITED {
+        match slot.load(Relaxed) {
+            h if h == handle => return,
+            0 => {
+                if slot.compare_exchange(0, handle, Relaxed, Relaxed).is_ok() {
+                    return;
+                }
+                if slot.load(Relaxed) == handle {
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_waited(handle: usize) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    handle != 0 && WAITED.iter().any(|slot| slot.load(Relaxed) == handle)
+}
+
+/// Our translation time since the thread's last signal that makes a signal "ours": it ran at
+/// least this much of our code (ns) in the job it just finished.
+const OURS_FLOOR_NS: u64 = 100_000;
+
+/// Whether a signal followed enough of our translation time (`ours` ns since the last one).
+pub(crate) fn signal_is_ours(ours_since_last: u64) -> bool {
+    ours_since_last >= OURS_FLOOR_NS
+}
+
+/// The title signalled `handle` (a semaphore release or an event set) on this thread.
+pub fn signal(handle: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !is_waited(handle) {
+        return;
+    }
+    let stat = me();
+    stat.signals.fetch_add(1, Relaxed);
+    let now = stat.ours_ns.load(Relaxed);
+    let before = LAST_OURS.with(|l| l.replace(now));
+    if signal_is_ours(now.saturating_sub(before)) {
+        stat.signals_ours.fetch_add(1, Relaxed);
+    }
+}
+
+/// CPU time (ns) of thread `tid`, 0 if it cannot be read.
+fn cpu_of(tid: u32) -> u64 {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{GetThreadTimes, OpenThread};
+    // SAFETY: a query handle, used and closed here.
+    unsafe {
+        let handle = OpenThread(0x800, 0, tid);
+        if handle.is_null() {
+            return 0;
+        }
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut create, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
+        let ok = GetThreadTimes(handle, &mut create, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        let ticks = |t: FILETIME| u64::from(t.dwHighDateTime) << 32 | u64::from(t.dwLowDateTime);
+        if ok != 0 { (ticks(kernel) + ticks(user)) * 100 } else { 0 }
+    }
+}
+
+fn sig_line(frames: f64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let threads: Vec<&'static ThreadStat> = THREADS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let ms = |ns: u64| ns as f64 / 1_000_000.0 / frames;
+    let (mut signals, mut ours, mut tagged) = (0u64, 0u64, 0usize);
+    let mut top: Option<(u64, u32, u64, u64, u64)> = None;
+    for t in &threads {
+        let s = t.signals.swap(0, Relaxed);
+        let so = t.signals_ours.swap(0, Relaxed);
+        let o = t.ours_ns.swap(0, Relaxed);
+        let cpu_now = if s > 0 || o > 0 { cpu_of(t.tid) } else { 0 };
+        let cpu = cpu_now.saturating_sub(t.cpu_ns.swap(cpu_now, Relaxed));
+        signals += s;
+        ours += so;
+        if o > 0 {
+            tagged += 1;
+        }
+        if s > 0 && top.is_none_or(|b| s > b.0) {
+            top = Some((s, t.tid, o, cpu, so));
+        }
+    }
+    let (ts, tid, to, tcpu, tso) = top.unwrap_or((0, 0, 0, 0, 0));
+    let pct = if signals > 0 { 100.0 * ours as f64 / signals as f64 } else { 0.0 };
+    tracing::info!(
+        "M1LK Sig Source: signals={:.1} | from_our_translation={:.1} ({pct:.0}%) from_title_only={:.1} | \
+         top_signaller_tid={tid} signals={:.1} from_ours={:.1} ran_in_ours={:.2} ms ran_in_title={:.2} ms | \
+         threads_tagged_as_translation={tagged}/{}",
+        signals as f64 / frames,
+        ours as f64 / frames,
+        (signals - ours) as f64 / frames,
+        ts as f64 / frames,
+        tso as f64 / frames,
+        ms(to),
+        ms(tcpu.saturating_sub(to)),
+        threads.len(),
+    );
+}
+
 /// The owner label of a wait.
 fn owner(s: &State, kind: Kind, handle: usize) -> &'static str {
     match kind {
@@ -169,6 +331,7 @@ pub(crate) fn line(frames: f64) {
         return;
     }
     let locate = |a: usize| LOCATE.get().map_or_else(|| format!("{a:#x}"), |f| f(a));
+    sig_line(frames);
     let waits = with(|s| {
         let waits = std::mem::take(&mut s.waits);
         waits
@@ -208,6 +371,22 @@ pub(crate) fn line(frames: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_signal_is_ours_after_enough_translation_time() {
+        assert!(!signal_is_ours(0));
+        assert!(!signal_is_ours(OURS_FLOOR_NS - 1));
+        assert!(signal_is_ours(OURS_FLOOR_NS));
+    }
+
+    #[test]
+    fn waited_handles_are_remembered_once() {
+        note_waited(0x1234_5670);
+        note_waited(0x1234_5670);
+        assert!(is_waited(0x1234_5670));
+        assert!(!is_waited(0x1234_5678));
+        assert!(!is_waited(0));
+    }
 
     #[test]
     fn rank_sums_by_owner() {
