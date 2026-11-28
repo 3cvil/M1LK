@@ -111,5 +111,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 82 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 2 | 4.1 | 16.7 | 133 | unchecked | 43* | [chart](test-82.svg) |
 | 83 | 2026-11-28 | Churn Clock at 1280x720 output (render ~853x480): is card exec pixel-... | 1 | 4.5 | 17 | 139 | unchecked | 41* | [chart](test-83.svg) |
 | 84 | 2026-11-28 | Churn Lists: per-command-list GPU time, top lists | 1.5 | 5.5 | 17.3 | 142 | unchecked | 33* | [chart](test-84.svg) |
+| 85 | 2026-11-28 | RAM: M1LK Skim Milk off, same exe, A/B 1 | 1.4 | 4.4 | 16.8 | 136 | unchecked | 41* | [chart](test-85.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
