@@ -132,5 +132,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 103 | 2026-11-28 | * HEAP_PASS_ASYNC=1: drop buffer_pass lock wait. fps rise? heap_buffe... | 1.2 | 3.9 | 15.5 | 148 | unchecked | 45* | [chart](test-103.svg) |
 | 104 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 1.6 | 3.4 | 19.6 | 134 | unchecked | 31* | [chart](test-104.svg) |
 | 105 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 1.8 | 4.2 | 17.7 | 144 | unchecked | 41* | [chart](test-105.svg) |
+| 106 | 2026-11-28 | GPU-bound test baseline (shader loops=32): host_exec+fps | 1.4 | 4.5 | 17.3 | 133 | unchecked | 41* | [chart](test-106.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
