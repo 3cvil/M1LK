@@ -153,5 +153,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 124 | 2026-11-28 | CLEAN made fast-path on (no profiler) - true real-world fps | 1.5 | 3.9 | 15.6 | 157 | unchecked | 43* | [chart](test-124.svg) |
 | 125 | 2026-11-28 | CLEAN made fast-path off (no profiler) - baseline | 2.5 | 4.4 | 15.5 | 138 | unchecked | 44* | [chart](test-125.svg) |
 | 126 | 2026-11-28 | CLEAN made fast-path on #2 | 2 | 3.8 | 15.3 | 138 | unchecked | 44* | [chart](test-126.svg) |
+| 127 | 2026-11-28 | * KEYSTONE crit-path: gpu_wait vs record vs present_wait - is frame G... | 2 | 4.1 | 15.7 | 144 | unchecked | 43* | [chart](test-127.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
