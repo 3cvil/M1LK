@@ -37,6 +37,9 @@ pub(crate) struct HostHeap {
     sampler: bool,
     /// The record (view index and generation) each slot was last made from.
     made: Mutex<Vec<u64>>,
+    /// `made`, readable without its lock (written with it, by [`HostHeap::set_made`]): the
+    /// unchanged-slot fast path of `mirror_if` (`VICTORY_MADE_SHARD=1`).
+    made_fast: Box<[std::sync::atomic::AtomicU64]>,
     /// The host resource each slot views, held while the slot does: shaders
     /// index heaps directly, so a slot the title has not rewritten since it
     /// released the resource may still be read, and a freed host resource
@@ -1121,6 +1124,7 @@ impl HostHeap {
             dynamic,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
+            made_fast: (0..count).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
             sparse_slots: Default::default(),
             next: Mutex::new((0, taken)),
@@ -1235,6 +1239,23 @@ fn null_sampler(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
     };
     // SAFETY: a slot of a sampler heap of ours.
     unsafe { host.device.CreateSampler(&desc, at) };
+}
+
+/// `VICTORY_MADE_SHARD=1`: mirror's unchanged-slot fast path without the `made` lock.
+pub(crate) fn made_shard_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("VICTORY_MADE_SHARD").is_ok_and(|v| v.trim() == "1");
+        if on {
+            tracing::info!("M1LK Churn: made fast-path on (unchanged mirror slots skip the made lock)");
+        }
+        on
+    })
+}
+
+/// Whether the lock-free copy of a slot's key shows the title's key (never for a slot not made).
+pub(crate) fn fast_hit(shown: u64, key: u64) -> bool {
+    key != 0 && shown == key
 }
 
 impl HostHeap {
@@ -1717,7 +1738,7 @@ impl HostHeap {
                 }
                 self.update_sparse(index, None, None, true);
                 if made[index as usize] == key {
-                    made[index as usize] = 0;
+                    self.set_made(&mut made, index, 0);
                 }
                 if let Some(mut queue) = queue {
                     queue.written(index, frame, frame, true);
@@ -1933,10 +1954,19 @@ impl HostHeap {
 
     /// Makes host slot `index` null again, as it is before its view is
     /// made: a null view of the kind it held.
+    /// Sets `made[index]` and its lock-free copy (the caller holds `made`).
+    fn set_made(&self, made: &mut [u64], index: u32, key: u64) {
+        made[index as usize] = key;
+        self.made_fast[index as usize].store(key, std::sync::atomic::Ordering::Release);
+    }
+
     fn unmake(&self, made: &mut [u64], index: u32) {
         let Some(key) = made.get_mut(index as usize).map(std::mem::take) else {
             return;
         };
+        if let Some(fast) = self.made_fast.get(index as usize) {
+            fast.store(0, std::sync::atomic::Ordering::Release);
+        }
         if key == 0 {
             self.update_sparse(index, None, None, false);
             return;
@@ -2311,7 +2341,7 @@ impl HostHeap {
         mut sample: SampledSrv,
     ) {
         if let Some(resource) = resource {
-            made[index as usize] = key;
+            self.set_made(made, index, key);
             self.keep_sparse(index, Some(resource), Some(sample.copy.clone()), sample.pending(key));
             return;
         }
@@ -2323,7 +2353,7 @@ impl HostHeap {
         {
             self.update_sparse(index, None, sample.pending(key), true);
         } else if crate::host::with_idle_texture_descriptors(|| null_for(view, self.cpu(index))) {
-            made[index as usize] = key;
+            self.set_made(made, index, key);
             self.keep_sparse(index, None, None, sample.pending(key));
         } else {
             sample.blocked = true;
@@ -2562,6 +2592,28 @@ impl HostHeap {
             return Ok(None);
         }
         let profiled = for_draw && queued_write.is_none();
+        if profiled && made_shard_on() {
+            // The unchanged slot, without the lock: exactly the case the locked path below
+            // answers with `current` true and nothing to make. A slot made or unmade at the
+            // same moment is read as the lock would have shown it just before or after.
+            let waited = crate::tprof::stamp();
+            // SAFETY: the handle is a descriptor slot in title memory.
+            let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+            let key = u64::from(generation) << 32 | u64::from(i);
+            if tag == VIEW_TAG
+                && fast_hit(self.made_fast[index as usize].load(std::sync::atomic::Ordering::Acquire), key)
+                && let Some(view) = view_at(i, generation)
+                && match &view {
+                    View::Placed(_, r, _) if r[0] != 1 && r[12] & 4 != 0 => self.shows_placed_owner(index, &view),
+                    _ => self.buffer_owner_current(index, &view),
+                }
+            {
+                crate::tprof::wait(crate::tprof::M::MadeHeld, waited);
+                crate::tprof::tally(crate::tprof::M::Entries, 1);
+                crate::tprof::tally(crate::tprof::M::Unchanged, 1);
+                return Ok(Some(view));
+            }
+        }
         let waited = if profiled { crate::tprof::stamp() } else { None };
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         crate::tprof::wait(crate::tprof::M::MadeWait, waited);
@@ -2586,7 +2638,7 @@ impl HostHeap {
             // Not a view of ours (never written, or of a resource the
             // title released): nothing to read.
             if made[index as usize] != 0 {
-                made[index as usize] = 0;
+                self.set_made(&mut made, index, 0);
                 self.make_null(index);
                 let _ = self.note_buffer(index, None, false);
             } else if for_draw || self.addresses.get().is_some()
@@ -2695,7 +2747,7 @@ impl HostHeap {
                 self.finish_sparse_slot(&mut made, index, key, &view, kept.flatten(), sample);
                 return Ok(Some(view));
             }
-            made[index as usize] = if later { 0 } else { key };
+            self.set_made(&mut made, index, if later { 0 } else { key });
             if kept.is_none() && !self.sampler {
                 null_for(&view, self.cpu(index));
                 // Its texture is asked for again once the host may have
@@ -2706,7 +2758,7 @@ impl HostHeap {
                 // made null for good, a slot shaders read only through the
                 // heap stayed null.
                 if !later && crate::resource::take_refused_for_memory() {
-                    made[index as usize] = 0;
+                    self.set_made(&mut made, index, 0);
                     if let Some(texture) = view.waiting_texture() {
                         super::wait_for(texture, handle);
                     }
@@ -5091,6 +5143,14 @@ mod tests {
         assert_eq!(heap.dynamic(7), Some(4));
         assert_eq!(heap.raw_page_views(&[]), Some((11, 0)));
         assert_eq!(heap.dynamic(1), Some(11 + super::FIRST_RAW_PAGE_SLOTS));
+    }
+
+    #[test]
+    fn fast_path_only_hits_a_made_slot_with_the_same_key() {
+        assert!(fast_hit(5 << 32 | 3, 5 << 32 | 3));
+        assert!(!fast_hit(0, 0));
+        assert!(!fast_hit(5 << 32 | 3, 6 << 32 | 3));
+        assert!(!fast_hit(0, 5 << 32 | 3));
     }
 
     #[test]
