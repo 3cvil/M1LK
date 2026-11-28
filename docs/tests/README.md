@@ -159,5 +159,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 130 | 2026-11-28 | * FINAL DIAG: what handle does present thread wait on - ours(pipeline... | 1.7 | 3.8 | 15.5 | 149 | unchecked | 43* | [chart](test-130.svg) |
 | 131 | 2026-11-28 | * FINAL DIAG: what handle does present thread wait on - ours(pipeline... | 1.8 | 3.1 | 15.6 | 141 | unchecked | 42* | [chart](test-131.svg) |
 | 132 | 2026-11-28 | * GO/NO-GO: do semaphore-signalling threads run OUR translation (rewo... | 2 | 3.8 | 15.8 | 136 | unchecked | 42* | [chart](test-132.svg) |
+| 133 | 2026-11-28 | * GO/NO-GO: do semaphore-signalling threads run OUR translation (rewo... | 1.2 | 3.8 | 15.9 | 143 | unchecked | 43* | [chart](test-133.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
