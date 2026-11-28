@@ -141,5 +141,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 112 | 2026-11-28 | repeat idle-split: confirm free_to_drop=0 / stale pinned (1 run so fa... | 1.4 | 3.9 | 16.3 | 152 | unchecked | 42* | [chart](test-112.svg) |
 | 113 | 2026-11-28 | table-cache A/B baseline (hash swap off): descriptor_copy tprof + fps | 1.8 | 4.2 | 16.7 | 146 | unchecked | 42* | [chart](test-113.svg) |
 | 114 | 2026-11-28 | TABLE_CACHE=1 (folded-multiply hash): descriptor_copy bucket drop? fp... | 1.3 | 3.7 | 16.4 | 145 | unchecked | 42* | [chart](test-114.svg) |
+| 115 | 2026-11-28 | * descriptor_copy SPLIT: dyn_alloc(safe) vs make_at/textures(hard) -... | 2 | 4 | 16 | 141 | unchecked | 43* | [chart](test-115.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
