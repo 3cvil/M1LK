@@ -161,5 +161,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 132 | 2026-11-28 | * GO/NO-GO: do semaphore-signalling threads run OUR translation (rewo... | 2 | 3.8 | 15.8 | 136 | unchecked | 42* | [chart](test-132.svg) |
 | 133 | 2026-11-28 | * GO/NO-GO: do semaphore-signalling threads run OUR translation (rewo... | 1.2 | 3.8 | 15.9 | 143 | unchecked | 43* | [chart](test-133.svg) |
 | 134 | 2026-11-28 | * TITLE SETTINGS LOW (lodScale0.5/grassLod0/vehHD0/cull2/nodmg): clea... | 1.6 | 4 | 15.5 | 136 | unchecked | 43* | [chart](test-134.svg) |
+| 135 | 2026-11-28 | TITLE SETTINGS LOW + crit-path: does present_wait/worker CPU DROP (ve... | 2.2 | 4.6 | 15.8 | 145 | unchecked | 35* | [chart](test-135.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
