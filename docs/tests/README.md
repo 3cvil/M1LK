@@ -151,5 +151,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 122 | 2026-11-28 | made fast-path REPEAT on #2 (confirm fps/made_wait not noise) | 1.9 | 3.7 | 15.9 | 136 | unchecked | 43* | [chart](test-122.svg) |
 | 123 | 2026-11-28 | made fast-path REPEAT off #2 | 1.7 | 3.7 | 15.5 | 143 | unchecked | 44* | [chart](test-123.svg) |
 | 124 | 2026-11-28 | CLEAN made fast-path on (no profiler) - true real-world fps | 1.5 | 3.9 | 15.6 | 157 | unchecked | 43* | [chart](test-124.svg) |
+| 125 | 2026-11-28 | CLEAN made fast-path off (no profiler) - baseline | 2.5 | 4.4 | 15.5 | 138 | unchecked | 44* | [chart](test-125.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
