@@ -523,6 +523,12 @@ static COPY_BACK: [std::sync::atomic::AtomicU64; 2] =
 /// newer sent; the next send ends that idle stretch.
 static CARD_CLOCK_US: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
+/// [`CARD_CLOCK_US`] as it stands, without clearing it: the card with nothing of ours queued, and
+/// how much of that the submitting thread was working (microseconds, since the last clearing).
+pub(crate) fn card_idle_us() -> [u64; 2] {
+    [CARD_CLOCK_US[0].load(Ordering::Relaxed), CARD_CLOCK_US[1].load(Ordering::Relaxed)]
+}
+
 /// Of the thread that holds the submission lock: the microseconds it has
 /// worked so far (preparing, copying back; not its waits for the card), and
 /// since when it works now ([`now_us`] plus one; 0: it does not).
@@ -1229,6 +1235,8 @@ pub(crate) struct HostList {
     indirect_args: Mutex<Option<(ID3D12Resource, u64)>>,
     /// Counts the list in [`ALIVE`] while it lives.
     _alive: Counted,
+    /// (M1LK Churn Clock) What the list recorded, for the per-list clock.
+    pub(crate) stats: crate::churn::ListStats,
     /// The texts of the markers `note_op` set, in order (for device-removed
     /// data without marker texts), with the host GPU range a copy reads.
     #[cfg(feature = "diagnostics")]
@@ -4509,6 +4517,7 @@ impl Host {
                 budget: OnceLock::new(),
                 indirect_args: Mutex::default(),
                 _alive: Counted::new(),
+                stats: crate::churn::ListStats::default(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
@@ -5863,6 +5872,9 @@ impl Host {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::Submissions, 1);
         let mut lists: Vec<Option<ID3D12CommandList>> = Vec::with_capacity(2 * runs.len());
+        // (M1LK Churn Clock, VICTORY_CHURN_LISTS=1) What each of `lists` is, in step with it.
+        let lists_on = crate::churn::lists();
+        let mut meta: Vec<crate::churn::ListMeta> = Vec::new();
         // Where each run's lists start in `lists`.
         let mut firsts = Vec::with_capacity(runs.len());
         let mut batch = Batch::default();
@@ -5947,6 +5959,9 @@ impl Host {
                 }
                 texture_uploads.extend(plan.uploads.iter().cloned());
                 lists.push(plan.commands.1.cast().ok());
+                if lists_on {
+                    meta.push(crate::churn::ListMeta::prelude(index, runs.len(), this_submission));
+                }
                 if parallel {
                     plans.push(plan);
                 } else {
@@ -5954,6 +5969,9 @@ impl Host {
                 }
             }
             lists.push(list.list.cast().ok());
+            if lists_on {
+                meta.push(crate::churn::ListMeta::title(index, runs.len(), this_submission, &list.stats));
+            }
             if let Some(since) = prelude_began {
                 crate::prof::lap(crate::prof::S::Preludes, since);
             }
@@ -5980,12 +5998,16 @@ impl Host {
                 crate::prof::lap(crate::prof::S::CardBefore, card_began);
                 if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
                     lists.push(Some(check));
+                    if lists_on {
+                        meta.push(crate::churn::ListMeta::check(runs.len(), this_submission));
+                    }
                 }
                 let execute_began = std::time::Instant::now();
-                self.execute_lists(&lists, true);
+                self.execute_lists_meta(&lists, true, &meta);
                 self.card_sent();
                 crate::prof::lap(crate::prof::S::Execute, execute_began);
                 lists.clear();
+                meta.clear();
                 poured_cards.extend(card);
                 crate::prof::count(crate::prof::C::PourChunks, 1);
             }
@@ -6040,6 +6062,9 @@ impl Host {
         crate::prof::lap(crate::prof::S::CardBefore, card_began);
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
+            if lists_on {
+                meta.push(crate::churn::ListMeta::check(runs.len(), this_submission));
+            }
         }
         let prepared = std::time::Instant::now();
         crate::prof::lap(crate::prof::S::SubmitBuild, build_began);
@@ -6049,7 +6074,7 @@ impl Host {
             // SAFETY: closed lists; the fence is ours.
             let signalled = unsafe {
                 let ordered = (flown && capture_readbacks()).then(|| QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
-                self.execute_lists(&lists, true);
+                self.execute_lists_meta(&lists, true, &meta);
                 if ordered.is_some() && let Some(card) = &card {
                     QUEUED_CARD_FLIGHT.store(card.sent_as, Ordering::Relaxed);
                 }
@@ -6115,7 +6140,7 @@ impl Host {
             let started = std::time::Instant::now();
             // SAFETY: closed lists; the fence and event are ours.
             unsafe {
-                self.execute_lists(group, true);
+                self.execute_lists_meta(group, true, if groups.len() == 1 { &meta } else { &[] });
                 self.card_sent();
                 let waited = self
                     .queue
@@ -6535,6 +6560,7 @@ impl HostList {
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
         self._alive.used();
+        self.stats.clear();
         // Releasing the last title resource can call the title's allocator.
         let old = std::mem::take(&mut *self.deferred());
         drop(old);
@@ -9161,6 +9187,12 @@ impl Host {
     /// PC's memory shared with the card (where the system moves what does
     /// not fit on the card).
     fn execute_lists(&self, lists: &[Option<ID3D12CommandList>], title: bool) {
+        self.execute_lists_meta(lists, title, &[]);
+    }
+
+    /// [`Host::execute_lists`], with what each list is (`meta`, in step with `lists`, or empty)
+    /// for the per-list clock of `VICTORY_CHURN_LISTS=1`.
+    fn execute_lists_meta(&self, lists: &[Option<ID3D12CommandList>], title: bool, meta: &[crate::churn::ListMeta]) {
         #[cfg(feature = "diagnostics")]
         let started = Instant::now();
         #[cfg(not(feature = "diagnostics"))]
@@ -9169,7 +9201,7 @@ impl Host {
         // corresponding queue fence.
         if let Some(clock) = crate::churn::host(self) {
             // (M1LK Churn Clock) The same lists with a card timestamp before and after.
-            clock.execute(&self.queue, lists, title);
+            clock.execute(&self.queue, lists, title, meta);
         } else {
             unsafe { self.queue.ExecuteCommandLists(lists) };
         }

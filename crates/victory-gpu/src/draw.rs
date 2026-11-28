@@ -777,6 +777,11 @@ impl State {
                 continue;
             };
             self.targets.push(record.resource as usize);
+            if rtvs.is_empty() && crate::churn::lists() {
+                // SAFETY: a plain query of a live resource.
+                let size = unsafe { texture.GetDesc() };
+                list.stats.target(size.Width, size.Height);
+            }
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(record.resource);
             rtvs.push(host.rtv(Some(texture), record.desc().as_ref()));
@@ -2542,6 +2547,7 @@ impl State {
                         list.list.SetComputeRoot32BitConstant(param, base, dword);
                         let count = (x - base).min(crate::indirect::PART);
                         list.list.Dispatch(count, y, z);
+                        list.stats.dispatch();
                         base += count;
                     }
                     list.list.SetComputeRoot32BitConstant(param, 0, dword);
@@ -2551,6 +2557,7 @@ impl State {
             _ => {
                 set_tail(0);
                 unsafe { list.list.Dispatch(x, y, z) };
+                list.stats.dispatch();
             }
         }
         if let Some((param, word, _)) = tail {
@@ -2944,6 +2951,7 @@ impl State {
                     self.mesh_scissor(list, true);
                     // SAFETY: an open list with everything set.
                     unsafe { l6.DispatchMesh(x, 1, 1) };
+                    list.stats.draw();
                     self.mesh_scissor(list, false);
                     #[cfg(feature = "diagnostics")]
                     self.dump_after(list);
@@ -3364,6 +3372,7 @@ impl State {
                 list.list
                     .DrawInstanced(count, instances, from, first_instance)
             };
+            list.stats.draw();
             if frontend.is_some() {
                 viewports(list, &self.viewports);
             }
@@ -3521,6 +3530,7 @@ impl State {
                 list.list
                     .DrawIndexedInstanced(indices, instances, first, base, first_instance)
             };
+            list.stats.draw();
             #[cfg(feature = "diagnostics")]
             self.dump_after(list);
             DRAWN.fetch_add(1, Ordering::Relaxed);
@@ -3849,6 +3859,11 @@ impl State {
                 )
             }
         };
+        if kind == DISPATCH {
+            list.stats.dispatch();
+        } else {
+            list.stats.draw();
+        }
         if kind == MESH {
             self.mesh_scissor(list, false);
         }

@@ -985,6 +985,7 @@ fn copy_overlapping_mips(
                     None,
                 );
             }
+            list.stats.copy();
         }
     }
 }
@@ -1026,6 +1027,7 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             list.note_op(|| format!("copy resource {src:?} to {dst:?}"));
             // SAFETY: an open list and live textures.
             unsafe { list.list.CopyResource(to, from) };
+            list.stats.copy();
         } else if let (Some((to, a)), Some((from, b))) = (
             crate::resource::buffer_bytes(dst),
             crate::resource::buffer_bytes(src),
@@ -1230,6 +1232,7 @@ extern "system" fn copy_texture_region(
                 host_box,
             )
         };
+        list.stats.copy();
     }
     #[cfg(not(windows))]
     let _ = (this, dst, x, y, z, src, source_box);
@@ -1301,6 +1304,7 @@ fn read_back(
         list.list
             .CopyTextureRegion((&raw const to).cast(), 0, 0, 0, (&raw const from).cast(), host_box)
     };
+    list.stats.copy();
     list.defer_read_back(buffer, data, [row as usize, rows as usize, pitch as usize], src.resource);
     Ok(())
 }
