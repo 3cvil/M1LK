@@ -721,14 +721,20 @@ pub(crate) fn forget(resource: usize) {
 /// The view the record words `i` and `generation` name: the one they hold
 /// whole, or the view of entry `i` if `generation` is still its own.
 fn view_at(i: u32, generation: u32) -> Option<View> {
+    let views = || {
+        let waited = crate::tprof::stamp();
+        let guard = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        crate::tprof::wait(crate::tprof::M::ViewsWait, waited);
+        guard
+    };
     match generation >> KIND_SHIFT {
         0 => {
-            let views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+            let views = views();
             let (view, current) = views.list.get(i as usize)?;
             (*current == generation).then(|| view.clone())
         }
         CONSTANT => Some(constant_of(i, generation)),
-        PLACED => VIEWS.lock().unwrap_or_else(|e| e.into_inner()).placed_of(i, generation),
+        PLACED => views().placed_of(i, generation),
         _ => None,
     }
 }

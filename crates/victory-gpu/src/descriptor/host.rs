@@ -2561,7 +2561,15 @@ impl HostHeap {
             }
             return Ok(None);
         }
+        let profiled = for_draw && queued_write.is_none();
+        let waited = if profiled { crate::tprof::stamp() } else { None };
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
+        crate::tprof::wait(crate::tprof::M::MadeWait, waited);
+        // Declared after `made`, so dropped before it: the time the lock is held.
+        let _held = profiled.then(|| crate::tprof::Held::new(crate::tprof::M::MadeHeld));
+        if profiled {
+            crate::tprof::tally(crate::tprof::M::Entries, 1);
+        }
         if queued_write.is_some_and(|write| !self.queued_write_current(index, write)) {
             return Ok(None);
         }
@@ -2618,7 +2626,14 @@ impl HostHeap {
         if !allow(&view, current) {
             return Err(());
         }
+        if profiled {
+            crate::tprof::tally(
+                if current { crate::tprof::M::Unchanged } else { crate::tprof::M::Changed },
+                1,
+            );
+        }
         if !current {
+            let _work = profiled.then(|| crate::tprof::Held::new(crate::tprof::M::Work));
             // Views of other textures in the memory this one describes
             // are stale: their host slots read nothing from here on, and
             // let go of the host copies they held.

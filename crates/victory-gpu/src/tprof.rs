@@ -198,6 +198,68 @@ fn merge(into: &mut [u64], from: &[u64]) {
     }
 }
 
+/// Lock and work times of `host.mirror` for draws (nanoseconds, summed over threads), and counts.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(crate) enum M {
+    /// Waiting for the host heap's `made` mutex.
+    MadeWait,
+    /// Holding it.
+    MadeHeld,
+    /// Waiting for the views mutex (all callers of `view_at`).
+    ViewsWait,
+    /// The changed-slot path of `mirror_if` (make, unmake, notes), inside the hold.
+    Work,
+    /// Table entries that took the lock.
+    Entries,
+    /// Of those, slots already showing their view.
+    Unchanged,
+    /// Of those, slots that were made again.
+    Changed,
+}
+
+const MIRROR: usize = M::Changed as usize + 1;
+static MS: [AtomicU64; MIRROR] = [const { AtomicU64::new(0) }; MIRROR];
+
+/// The time now, if the profile is on (for [`wait`]).
+#[inline]
+pub(crate) fn stamp() -> Option<Instant> {
+    on().then(Instant::now)
+}
+
+/// Adds the time since `since` to `m`.
+#[inline]
+pub(crate) fn wait(m: M, since: Option<Instant>) {
+    if let Some(since) = since {
+        MS[m as usize].fetch_add(since.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
+/// Adds `n` to the mirror count `m`.
+#[inline]
+pub(crate) fn tally(m: M, n: u64) {
+    if on() {
+        MS[m as usize].fetch_add(n, Relaxed);
+    }
+}
+
+/// Adds the time from its making to its drop to `m`.
+pub(crate) struct Held(M, Option<Instant>);
+
+impl Held {
+    #[inline]
+    pub(crate) fn new(m: M) -> Held {
+        Held(m, stamp())
+    }
+}
+
+impl Drop for Held {
+    #[inline]
+    fn drop(&mut self) {
+        wait(self.0, self.1);
+    }
+}
+
 /// The frame line, over `frames` frames; takes the sums.
 pub(crate) fn line(frames: f64) {
     if frames <= 0.0 || !on() {
@@ -235,6 +297,19 @@ pub(crate) fn line(frames: f64) {
         total as f64 / 1000.0 / calls,
     );
     tracing::info!("M1LK Translate Prof ms/frame (threads={threads}):{text}");
+    let m = |m: M| MS[m as usize].swap(0, Relaxed);
+    let (wait_ns, held_ns, views_ns, work_ns) = (m(M::MadeWait), m(M::MadeHeld), m(M::ViewsWait), m(M::Work));
+    let (entries, unchanged, changed) = (m(M::Entries), m(M::Unchanged), m(M::Changed));
+    tracing::info!(
+        "M1LK Mirror Prof ms/frame: made_wait={:.2} made_held={:.2} views_wait={:.2} work={:.2} | entries={:.0} unchanged={:.0} changed={:.0}",
+        ms_per_frame(wait_ns, frames),
+        ms_per_frame(held_ns, frames),
+        ms_per_frame(views_ns, frames),
+        ms_per_frame(work_ns, frames),
+        entries as f64 / frames,
+        unchanged as f64 / frames,
+        changed as f64 / frames,
+    );
     let part = |b: B| ms_per_frame(sub(b), frames);
     tracing::info!(
         "M1LK Descriptor Sub ms/frame: descriptor_copy={:.2} = dyn_alloc={:.2} make_at={:.2} readable={:.2} constant_at={:.2} tbl_hash={:.2} tbl_other={:.2}",
