@@ -43,6 +43,28 @@ pub(crate) fn lists() -> bool {
     *ON.get_or_init(|| on() && std::env::var("VICTORY_CHURN_LISTS").is_ok_and(|v| v.trim() == "1"))
 }
 
+/// An env number, or `default` when unset or not a number.
+fn env_number(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
+/// `VICTORY_CHURN_LISTS_EVERY=N`: one frame in N is stamped per list (default 30; 1 is every frame).
+fn every() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| env_number("VICTORY_CHURN_LISTS_EVERY", 30))
+}
+
+/// `VICTORY_CHURN_LISTS_MAX=K`: at most K lists of a submission are stamped (default 64).
+fn most() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| env_number("VICTORY_CHURN_LISTS_MAX", 64).clamp(1, 4096) as usize)
+}
+
+/// Whether `frame` is one of the sampled ones (one in `every`; 0 and 1 mean all).
+pub(crate) fn sampled_frame(frame: u64, every: u64) -> bool {
+    every <= 1 || frame % every == 0
+}
+
 /// `VICTORY_CHURN_CLOCK=1` with the submit profiler on.
 pub(crate) fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -281,6 +303,9 @@ struct PerList {
     buckets: [u64; 6],
     /// Submissions without per-list stamps (ring full, lists not made).
     skipped: u64,
+    /// Frames that had lists stamped, and the last of them.
+    sampled: u64,
+    last_frame: Option<u64>,
 }
 
 struct Ring {
@@ -386,6 +411,8 @@ impl PerList {
             sums: HashMap::new(),
             buckets: [0; 6],
             skipped: 0,
+            sampled: 0,
+            last_frame: None,
         })
     }
 }
@@ -520,11 +547,15 @@ impl Clock {
         slot: usize,
         lists: &[Option<ID3D12CommandList>],
         meta: &[ListMeta],
-    ) -> Option<(Vec<ID3D12CommandList>, ID3D12CommandList)> {
+    ) -> Option<(Vec<ID3D12CommandList>, ID3D12CommandList, usize)> {
         let per = ring.per_list.as_mut()?;
-        if meta.len() != lists.len() || lists.iter().any(Option::is_none) {
+        let frame = crate::frame::current();
+        if !sampled_frame(frame, every()) || meta.len() != lists.len() || lists.iter().any(Option::is_none) {
             return None;
         }
+        // At most `most()` lists are stamped; the rest of the call runs after, unstamped.
+        let lists = &lists[..lists.len().min(most())];
+        let meta = &meta[..lists.len()];
         let need = lists.len() as u64 + 1;
         let Some((start, end)) = alloc_range(per.head, per.tail, QUERIES as u64, need) else {
             per.skipped += 1;
@@ -570,8 +601,12 @@ impl Clock {
             list.Close().ok()?;
             let resolve: ID3D12CommandList = list.cast().ok()?;
             per.head = end;
+            if per.last_frame != Some(frame) {
+                per.last_frame = Some(frame);
+                per.sampled += 1;
+            }
             per.listed[slot] = Some(Listed { first, end, metas: meta.to_vec() });
-            Some((stamps, resolve))
+            Some((stamps, resolve, lists.len()))
         }
     }
 
@@ -597,13 +632,14 @@ impl Clock {
         let mut all = Vec::with_capacity(2 * lists.len() + 4);
         all.push(Some(first));
         match between {
-            Some((stamps, resolve)) => {
-                for (stamp, list) in stamps.iter().zip(lists) {
+            Some((stamps, resolve, stamped)) => {
+                for (stamp, list) in stamps.iter().zip(&lists[..stamped]) {
                     all.push(Some(stamp.clone()));
                     all.push(list.clone());
                 }
                 all.push(stamps.last().cloned());
                 all.push(Some(resolve));
+                all.extend_from_slice(&lists[stamped..]);
             }
             None => all.extend_from_slice(lists),
         }
@@ -618,11 +654,11 @@ impl Clock {
     }
 
     /// The per-list sums since the last call, with the submissions the ring had no stamps for.
-    fn take_lists(&self) -> Option<(HashMap<Key, Agg>, [u64; 6], u64)> {
+    fn take_lists(&self) -> Option<(HashMap<Key, Agg>, [u64; 6], u64, u64)> {
         let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         self.drain(&mut ring);
         let per = ring.per_list.as_mut()?;
-        Some((std::mem::take(&mut per.sums), std::mem::take(&mut per.buckets), std::mem::take(&mut per.skipped)))
+        Some((std::mem::take(&mut per.sums), std::mem::take(&mut per.buckets), std::mem::take(&mut per.skipped), std::mem::take(&mut per.sampled)))
     }
 
     /// The sums since the last call, and how many submissions went unstamped.
@@ -682,7 +718,10 @@ pub(crate) fn line(host: &crate::host::Host, frames: f64) {
         gap_title,
         gap_ours,
     );
-    if let Some((sums, buckets, skipped)) = clock.take_lists() {
+    if let Some((sums, buckets, skipped, sampled)) = clock.take_lists() {
+        // Per sampled frame (the stamps of the other frames are not made).
+        let frames = sampled.max(1) as f64;
+        let ms = |ticks: u64| ticks_to_us(ticks, clock.card_frequency) as f64 / 1000.0 / frames;
         let mut text = String::new();
         for (i, (key, agg)) in top(&sums, 8).iter().enumerate() {
             let lists = agg.lists.max(1) as f64;
@@ -706,11 +745,12 @@ pub(crate) fn line(host: &crate::host::Host, frames: f64) {
                 agg.copies as f64 / lists,
             );
         }
-        tracing::info!("M1LK Churn Lists top:{text}");
+        tracing::info!("M1LK Churn Lists top (sampled_frames={sampled} every={} max={}):{text}", every(), most());
         let total: u64 = buckets.iter().sum();
         let hist: Vec<String> = BUCKETS.iter().zip(buckets).map(|(name, ticks)| format!("{name}={:.2}", ms(ticks))).collect();
         tracing::info!(
-            "M1LK Churn Lists hist ms/frame: {} total={:.2} keys={} unlisted_submissions={:.1}",
+            "M1LK Churn Lists hist ms/sampled_frame (sampled_frames={}): {} total={:.2} keys={} unlisted_submissions={:.1}",
+            sampled,
             hist.join(" "),
             ms(total),
             sums.len(),
@@ -795,6 +835,12 @@ mod tests {
         assert_eq!((best[0].1.ticks, best[0].1.lists), (70, 1));
         let both = top(&sums, 8);
         assert_eq!((both.len(), both[1].1.ticks, both[1].1.draws), (2, 50, 4));
+    }
+
+    #[test]
+    fn one_frame_in_n_is_sampled() {
+        assert!(sampled_frame(5, 0) && sampled_frame(5, 1));
+        assert!(sampled_frame(60, 30) && !sampled_frame(61, 30));
     }
 
     #[test]
