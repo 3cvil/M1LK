@@ -137,5 +137,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 108 | 2026-11-28 | GPU-bound test milder (shader loops=16): host_exec drop + fps change... | 1.6 | 3.5 | 16.4 | 142 | unchecked | 43* | [chart](test-108.svg) |
 | 109 | 2026-11-28 | round 7: landed command lists reset on the helper thread instead of i... | 0.1 | 0.1 | 16.8 | 184 | unchecked | 30* | [chart](test-109.svg) |
 | 110 | 2026-11-28 | * TEXTURE USE: measure never-read texture MB (VRAM evictable lower bo... | 2 | 4.2 | 16.6 | 146 | unchecked | 42* | [chart](test-110.svg) |
+| 111 | 2026-11-28 | * idle-split: free_to_drop vs held_by_slot of stale textures - decide... | 1.6 | 3.9 | 16.6 | 145 | unchecked | 39* | [chart](test-111.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
