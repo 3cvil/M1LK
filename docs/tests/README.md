@@ -124,5 +124,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 95 | 2026-11-28 | CLEAN sweep-off only +HEAP_LAZY (offset RAM): fps vs pp-off 4.5? DIAG... | 1.4 | 4.2 | 15.4 | 146 | unchecked | 44* | [chart](test-95.svg) |
 | 96 | 2026-11-28 | clamp-barrier A/B baseline (CLAMP_LOCAL_BARRIER off): host_exec+fps+p... | 2.6 | 3.8 | 17.7 | 138 | unchecked | 38* | [chart](test-96.svg) |
 | 97 | 2026-11-28 | clamp-barrier FIX: scoped UAV barriers in clamp | 1.6 | 3.8 | 17.9 | 142 | unchecked | 38* | [chart](test-97.svg) |
+| 98 | 2026-11-28 | SUBMIT_THREAD A/B baseline (worker off): fps+RAM+submit profile+host_... | 1.2 | 3.9 | 17.5 | 136 | unchecked | 39* | [chart](test-98.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
