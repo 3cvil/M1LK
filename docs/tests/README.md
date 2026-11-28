@@ -166,5 +166,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 137 | 2026-11-28 | MATCHED baseline NORMAL settings (same rennet exe) vs lod-fps - resto... | 2.2 | 4.2 | 15.6 | 143 | unchecked | 36* | [chart](test-137.svg) |
 | 138 | 2026-11-28 | MATCHED baseline crit-path NORMAL settings vs lod-crit | 1.7 | 4 | 15.6 | 141 | unchecked | 46* | [chart](test-138.svg) |
 | 139 | 2026-11-28 | CLEAN made fast-path off #2 | 1.2 | 3.9 | 15.5 | 143 | unchecked | 36* | [chart](test-139.svg) |
+| 140 | 2026-11-28 | rounds 2+4 in one run: 9 changes (incl. batched write-watch asks) swi... | 2 | 4 | 15.9 | 142 | unchecked | 35* | [chart](test-140.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
