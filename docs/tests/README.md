@@ -108,5 +108,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 79 | 2026-11-27 | STACK on, A/B 2 - does a big CPU-prep cut move fps? | 2.1 | 4.2 | 16.8 | 142 | unchecked | 42* | [chart](test-79.svg) |
 | 80 | 2026-11-28 | STACK off, A/B 2 - does a big CPU-prep cut move fps? | 1.1 | 3.8 | 17.6 | 140 | unchecked | 40* | [chart](test-80.svg) |
 | 81 | 2026-11-28 | M1LK Churn Clock: GPU timestamps on host queue (stack on) | 1.4 | 4.3 | 16.9 | 140 | unchecked | 42* | [chart](test-81.svg) |
+| 82 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 2 | 4.1 | 16.7 | 133 | unchecked | 43* | [chart](test-82.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
