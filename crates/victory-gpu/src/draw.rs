@@ -4053,6 +4053,9 @@ fn readable_view(list: &HostList, kind: ResourceType, view: &View, placed: bool)
     let mut ready = true;
     match (view, kind) {
         (View::Shader(resource, _), ResourceType::Srv) => {
+            if crate::texuse::on() {
+                crate::resource::note_read(*resource as This);
+            }
             // A view the title placed, in another format, in the memory of
             // a texture the host writes: that texture's texels, copied on
             // the host (title memory does not have them).
@@ -4098,6 +4101,9 @@ fn readable_view(list: &HostList, kind: ResourceType, view: &View, placed: bool)
             }
         }
         (View::Unordered(resource, _, _), ResourceType::Uav) => {
+            if crate::texuse::on() {
+                crate::resource::note_read(*resource as This);
+            }
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(*resource as This);
             #[cfg(feature = "diagnostics")]

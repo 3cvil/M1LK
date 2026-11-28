@@ -3968,6 +3968,7 @@ fn late_line(frames: f64) {
     }
     crate::prof::line(frames);
     crate::tprof::line(frames);
+    crate::texuse::line();
     if let Some(host) = host() {
         crate::churn::line(host, frames);
     }
@@ -8480,6 +8481,7 @@ impl Meter {
         #[cfg(feature = "diagnostics")]
         crate::copystat::presented();
         self.frames += 1;
+        crate::texuse::frame();
         #[cfg(feature = "diagnostics")]
         {
             self.copy_stats_frames += 1;

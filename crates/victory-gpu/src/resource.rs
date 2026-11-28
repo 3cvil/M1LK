@@ -1298,6 +1298,8 @@ struct Hosted {
     placed: std::sync::atomic::AtomicBool,
     /// The most recent placed SRV covers a proper tail of the mip chain.
     coarse_view: std::sync::atomic::AtomicBool,
+    /// `texuse::stamp` of the last draw that read it (0: never), `VICTORY_TEXTURE_USE_PROF=1`.
+    last_read: std::sync::atomic::AtomicU64,
 }
 
 /// Counts for the memory line: host copies of textures the title fills
@@ -2169,6 +2171,37 @@ pub(crate) fn census() -> [u64; 10] {
     count
 }
 
+/// `VICTORY_TEXTURE_USE_PROF`: a draw reads `this` through a shader view.
+#[cfg(windows)]
+pub(crate) fn note_read(this: This) {
+    if this.is_null() || !is_resource(this) {
+        return;
+    }
+    resource(this).host.last_read.store(crate::texuse::stamp(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `VICTORY_TEXTURE_USE_PROF`: the host copies alive, by when a draw last read them. Never
+/// waits on a texture's lock (a busy one is skipped), and makes nothing.
+#[cfg(windows)]
+pub(crate) fn use_census(now: u64) -> crate::texuse::Census {
+    use crate::texuse::Kind;
+    let mut census = crate::texuse::Census::default();
+    let all = textures();
+    for &at in all.iter() {
+        // SAFETY: as in `census`.
+        let r = unsafe { &*(at as *const Resource) };
+        let Ok(made) = r.host.made.try_lock() else {
+            census.skipped += 1;
+            continue;
+        };
+        if let Some((host, _)) = made.as_ref() {
+            let kind = if host.filled { Kind::Fill } else { Kind::Written };
+            census.add(kind, host.bytes(), r.host.last_read.load(std::sync::atomic::Ordering::Relaxed), now);
+        }
+    }
+    census
+}
+
 /// Host textures alive (the title's and the twins) and the bytes the host
 /// gives them, for the memory line.
 #[cfg(windows)]
@@ -2708,6 +2741,7 @@ fn hand_out_resource(
             gone: std::sync::atomic::AtomicBool::new(false),
             placed: std::sync::atomic::AtomicBool::new(false),
             coarse_view: std::sync::atomic::AtomicBool::new(false),
+            last_read: std::sync::atomic::AtomicU64::new(0),
         },
     });
     // The host copy waits for the texture's first use ([`Hosted`]).

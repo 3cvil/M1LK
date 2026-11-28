@@ -62,6 +62,7 @@ mod port;
 mod prof;
 #[cfg(windows)]
 mod tprof;
+mod texuse;
 pub mod list;
 pub mod object;
 pub mod pipeline;
