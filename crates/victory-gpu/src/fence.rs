@@ -113,6 +113,8 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
     let asked = crate::prof::crit_stamp();
     #[cfg(not(windows))]
     let asked = None;
+    #[cfg(windows)]
+    crate::waitlog::note_fence(event as usize);
     waiters.push((value, event as usize, asked));
     S_OK
 }

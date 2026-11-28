@@ -407,6 +407,7 @@ fn crit_line() {
         return;
     }
     wait_line(frames, frame_ns, cpu_ns);
+    crate::waitlog::line(frames as f64);
     let f = frames as f64;
     let ms_ns = |ns: u64| ns as f64 / 1_000_000.0 / f;
     let ms_us = |us: u64| us as f64 / 1000.0 / f;
