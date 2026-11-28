@@ -146,5 +146,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 117 | 2026-11-28 | table-cache REPEAT off #2 | 1.5 | 3.9 | 16.9 | 142 | unchecked | 41* | [chart](test-117.svg) |
 | 118 | 2026-11-28 | * DECISIVE: mirror made_wait vs held vs work - does the biggest fps c... | 0.1 | 0.4 | 15.8 | 191 | unchecked | 35* | [chart](test-118.svg) |
 | 119 | 2026-11-28 | repeat descriptor_copy split - confirm tbl_other dominates (ratios sw... | 0.1 | 0.2 | 16.6 | 195 | unchecked | 32* | [chart](test-119.svg) |
+| 120 | 2026-11-28 | made fast-path A/B baseline (off): fps + made_wait | 1.4 | 3.8 | 17 | 146 | unchecked | 41* | [chart](test-120.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
