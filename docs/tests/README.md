@@ -144,5 +144,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 115 | 2026-11-28 | * descriptor_copy SPLIT: dyn_alloc(safe) vs make_at/textures(hard) -... | 2 | 4 | 16 | 141 | unchecked | 43* | [chart](test-115.svg) |
 | 116 | 2026-11-28 | table-cache REPEAT on #2 (confirm fps +0.6 not noise) | 1.9 | 3.9 | 16.8 | 135 | unchecked | 41* | [chart](test-116.svg) |
 | 117 | 2026-11-28 | table-cache REPEAT off #2 | 1.5 | 3.9 | 16.9 | 142 | unchecked | 41* | [chart](test-117.svg) |
+| 118 | 2026-11-28 | * DECISIVE: mirror made_wait vs held vs work - does the biggest fps c... | 0.1 | 0.4 | 15.8 | 191 | unchecked | 35* | [chart](test-118.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
