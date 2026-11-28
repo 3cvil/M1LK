@@ -1022,6 +1022,7 @@ impl State {
     fn memory_ready(
         &self, list: &HostList, compute: bool, writes: Writes, shader: &victory_shader::emit::HostShader,
     ) -> Option<crate::memory::Ready> {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::MemoryReady);
         let heap = match self.heaps[0] {
             0 => None,
             h => crate::descriptor::heap(h as This).host(),
@@ -1096,6 +1097,7 @@ impl State {
             crate::ambient::sky_drawn(sky);
         }
         let l = &list.list;
+        let vertex_t = crate::tprof::Scope::new(crate::tprof::B::VertexBuffers);
         // Vertex buffers the input layout reads.
         let mut views = [D3D12_VERTEX_BUFFER_VIEW::default(); 32];
         let mut count = 0;
@@ -1137,6 +1139,7 @@ impl State {
             // SAFETY: an open list; the view names a live host buffer.
             unsafe { l.IASetIndexBuffer(Some(&view)) };
         }
+        drop(vertex_t);
         const RENDER_TARGET: u32 = 0x4;
         for &t in &self.targets {
             crate::list::ensure_state(list, t as This, RENDER_TARGET);
@@ -1172,6 +1175,7 @@ impl State {
     /// False if the draw or dispatch must not run: a root SRV it reads
     /// could not be given a view.
     fn bind(&mut self, list: &HostList, p: &HostPipeline, builder: bool, indirect: bool) -> bool {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::BindOther);
         let compute = p.compute;
         // Depth planes this list's shaders wrote (the material classes):
         // drawn into their planes by a pass of ours before anything of the
@@ -1188,6 +1192,7 @@ impl State {
         // Heaps first: a root signature with directly indexed heaps must be
         // set after them.
         if self.host_heaps != self.heaps {
+            let _t = crate::tprof::Scope::new(crate::tprof::B::RootSet);
             let heaps: Vec<Option<ID3D12DescriptorHeap>> = self
                 .heaps
                 .iter()
@@ -1211,6 +1216,7 @@ impl State {
         TESTED_DEPTH.set((tested, false));
         let root = p.root.as_raw() as usize;
         if self.host_roots[usize::from(compute)] != root {
+            let _t = crate::tprof::Scope::new(crate::tprof::B::RootSet);
             // SAFETY: an open list and a live root signature.
             unsafe {
                 if compute {
@@ -1224,6 +1230,7 @@ impl State {
         // By host object: a title pipeline released and another made at its
         // address is another host pipeline (the list keeps the old one).
         if self.host_pipeline != p.pso.as_raw() as usize {
+            let _t = crate::tprof::Scope::new(crate::tprof::B::PsoBind);
             // SAFETY: an open list and a live pipeline.
             unsafe { l.SetPipelineState(&p.pso) };
             self.host_pipeline = p.pso.as_raw() as usize;
@@ -1272,6 +1279,7 @@ impl State {
                 None
             };
             if let Some((param, dwords)) = stage.user_data {
+                let _t = crate::tprof::Scope::new(crate::tprof::B::RootSet);
                 let mut values = vec![0u32; dwords as usize];
                 for u in &t.host.user_data {
                     if let RootType::Other(kind) = u.root {
@@ -1311,6 +1319,7 @@ impl State {
                     }
                 }
             }
+            let views_t = crate::tprof::Scope::new(crate::tprof::B::RootSet);
             for (views, srv) in [(&stage.root_cbvs, false), (&stage.root_srvs, true)] {
                 for &(slot, param) in views {
                     if srv && slot == victory_shader::emit::SLOT_MEMORY {
@@ -1407,6 +1416,7 @@ impl State {
                     }
                 }
             }
+            drop(views_t);
             for &(slot, param) in &stage.root_uavs {
                 if slot == victory_shader::emit::SLOT_FAULTS {
                     // Ours: where shaders note the pages they found empty.
@@ -1461,6 +1471,7 @@ impl State {
         compute: bool,
         writes: bool,
     ) -> bool {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::RootUav);
         const UNORDERED: i32 = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0;
         static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         let limit = *LIMIT.get_or_init(|| {
@@ -1573,6 +1584,7 @@ impl State {
         compute: bool,
         biased: bool,
     ) -> bool {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::RootSrvTable);
         let heap = match self.heaps[0] {
             0 => None,
             h => Some(crate::descriptor::heap(h as This)),
@@ -1655,6 +1667,7 @@ impl State {
     /// copy. A list refreshes them where it first runs such a shader;
     /// title writes recorded later in the same list are not seen.
     fn heap_buffers(&self, list: &HostList) -> Option<u64> {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::HeapBuffers);
         let heap = self
             .heaps
             .iter()
@@ -1831,6 +1844,7 @@ impl State {
     /// title's bake programs. The uploads are recorded into `list` ahead
     /// of the draw being bound, as the world's pass records them.
     fn early_textures(&self, list: &HostList, p: &HostPipeline, compute: bool) {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::EarlyTextures);
         let (early_ms, bake_ms) = early_budgets();
         if compute || (early_ms == 0 && bake_ms == 0) {
             return;
@@ -2442,6 +2456,8 @@ impl State {
 
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32, flags: Option<u32>) {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::DispatchOther);
+        crate::tprof::count(crate::tprof::C::Dispatches, 1);
         // It may write the arguments a window holds clamped.
         self.window = None;
         let builder = crate::pipeline::is_builder(self.pipeline as This);
@@ -2938,6 +2954,8 @@ impl State {
     /// programs are one-dimensional).
     pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32) {
         ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        let _t = crate::tprof::Scope::new(crate::tprof::B::DrawOther);
+        crate::tprof::count(crate::tprof::C::Draws, 1);
         self.window = None;
         #[cfg(feature = "diagnostics")]
         self.trace("mesh", x, 0);
@@ -3083,6 +3101,7 @@ impl State {
         indexed: &[RootIndexedView],
         compute: bool,
     ) -> Vec<(u8, u32)> {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::DescriptorCopy);
         let tables = |u: &&UsedResource| u.root == RootType::Table;
         let mut fresh: Vec<u8> = used
             .iter()
@@ -3342,6 +3361,8 @@ impl State {
         first_instance: u32,
     ) {
         ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        let _t = crate::tprof::Scope::new(crate::tprof::B::DrawOther);
+        crate::tprof::count(crate::tprof::C::Draws, 1);
         self.window = None;
         #[cfg(feature = "diagnostics")]
         self.trace("draw", vertices, first);
@@ -3512,6 +3533,8 @@ impl State {
         first_instance: u32,
     ) {
         ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        let _t = crate::tprof::Scope::new(crate::tprof::B::DrawOther);
+        crate::tprof::count(crate::tprof::C::Draws, 1);
         self.window = None;
         #[cfg(feature = "diagnostics")]
         self.trace("indexed", indices, first);
@@ -3563,6 +3586,11 @@ impl State {
         arguments: u64,
         count: Option<u64>,
     ) -> bool {
+        let _t = crate::tprof::Scope::new(crate::tprof::B::ExecuteIndirect);
+        crate::tprof::count(
+            if kind == 2 { crate::tprof::C::Dispatches } else { crate::tprof::C::Draws },
+            1,
+        );
         let ran = self.run_indirect(list, (kind, stride, max), arguments, count);
         if kind == 2 && max != 0 && crate::pipeline::is_builder(self.pipeline as This) {
             if !ran {

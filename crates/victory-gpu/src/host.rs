@@ -3967,6 +3967,7 @@ fn late_line(frames: f64) {
         }
     }
     crate::prof::line(frames);
+    crate::tprof::line(frames);
     if let Some(host) = host() {
         crate::churn::line(host, frames);
     }

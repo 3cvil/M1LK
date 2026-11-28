@@ -60,6 +60,8 @@ mod port;
 #[cfg(windows)]
 #[allow(dead_code)]
 mod prof;
+#[cfg(windows)]
+mod tprof;
 pub mod list;
 pub mod object;
 pub mod pipeline;

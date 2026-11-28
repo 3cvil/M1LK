@@ -293,6 +293,7 @@ pub(crate) fn bound(
     count: Option<(&ID3D12Resource, u64)>,
     spec: (u32, u32, u32),
 ) -> Option<ID3D12Resource> {
+    let _t = crate::tprof::Scope::new(crate::tprof::B::IndirectClamp);
     let bytes = validate_layout(spec, src.1, count.map(|(_, off)| off))?;
     let (c, budget, dst) = (clamp()?, list.budget()?, list.indirect_scratch(bytes)?);
     record_clamp(c, &list.list, &dst, budget, src, count, spec).then_some(dst)
@@ -313,6 +314,7 @@ pub(crate) fn bound_ahead(
     src: (&ID3D12Resource, u64),
     spec: (u32, u32, u32),
 ) -> Option<ID3D12Resource> {
+    let _t = crate::tprof::Scope::new(crate::tprof::B::IndirectClamp);
     let bytes = validate_layout(spec, src.1, None)?;
     let (c, budget, dst) = (clamp()?, list.budget()?, list.indirect_scratch(bytes)?);
     record_clamp_as(c, &list.list, &dst, budget, src, None, spec, AHEAD).then_some(dst)
@@ -334,6 +336,7 @@ pub(crate) const PART_BYTES: u64 = 12;
 /// they showed before.
 pub(crate) fn bound_split(list: &HostList, src: (&ID3D12Resource, u64)) -> Option<ID3D12Resource> {
     let spec = (2, 12, 1);
+    let _t = crate::tprof::Scope::new(crate::tprof::B::IndirectClamp);
     validate_layout(spec, src.1, None)?;
     let (c, budget) = (clamp()?, list.budget()?);
     let dst = list.indirect_scratch(u64::from(SPLIT) * PART_BYTES)?;
@@ -370,6 +373,7 @@ fn record_clamp_as(
     (kind, stride, records): (u32, u32, u32),
     how: u32,
 ) -> bool {
+    let _t = crate::tprof::Scope::new(crate::tprof::B::IndirectClamp);
     let Some(bytes) = validate_layout(
         (kind, stride, records),
         src_offset,
