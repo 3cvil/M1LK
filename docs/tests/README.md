@@ -120,5 +120,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 91 | 2026-11-28 | INDIRECT_WINDOW=1: clamp up to 64 records/pass | 2 | 4.2 | 17.5 | 134 | unchecked | 41* | [chart](test-91.svg) |
 | 92 | 2026-11-28 | prep-parallel A/B baseline (title-thread critical-path test) | - | - | 22.6 | - | unchecked | - | [chart](test-92.svg) |
 | 93 | 2026-11-28 | prep-parallel: move sweep off + parallel refresh/preludes | 1.1 | 4.1 | 16.4 | 149 | unchecked | 44* | [chart](test-93.svg) |
+| 94 | 2026-11-28 | matched baseline for sweep-off (HEAP_LAZY=1 only) - isolates SWEEP ef... | 1.8 | 3.3 | 23.3 | 146 | unchecked | 30* | [chart](test-94.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
