@@ -133,5 +133,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 104 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 1.6 | 3.4 | 19.6 | 134 | unchecked | 31* | [chart](test-104.svg) |
 | 105 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 1.8 | 4.2 | 17.7 | 144 | unchecked | 41* | [chart](test-105.svg) |
 | 106 | 2026-11-28 | GPU-bound test baseline (shader loops=32): host_exec+fps | 1.4 | 4.5 | 17.3 | 133 | unchecked | 41* | [chart](test-106.svg) |
+| 107 | 2026-11-28 | * GPU-bound TEST: shader loops=4 (slash GPU shader work). host_exec d... | 1.5 | 4.3 | 16.4 | 132 | unchecked | 44* | [chart](test-107.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
