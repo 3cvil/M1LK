@@ -432,10 +432,10 @@ fn record_clamp_as(
         let mut v = Vec::with_capacity(3);
         if waits {
             v.push(uav_barrier_on(Some(src)));
-            if let Some((buf, _)) = count {
-                if buf != src {
-                    v.push(uav_barrier_on(Some(buf)));
-                }
+            if let Some((buf, _)) = count
+                && buf != src
+            {
+                v.push(uav_barrier_on(Some(buf)));
             }
         }
         v.push(transition(
