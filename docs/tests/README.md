@@ -115,5 +115,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 86 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 2.2 | 4.5 | 16.5 | 133 | unchecked | 45* | [chart](test-86.svg) |
 | 87 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 2 | 4.4 | 16.5 | 133 | unchecked | 43* | [chart](test-87.svg) |
 | 88 | 2026-11-28 | barrier A/B baseline: CHURN_CLOCK host_exec, BARRIER_TEST off | 1.8 | 4.7 | 16.7 | 138 | unchecked | 43* | [chart](test-88.svg) |
+| 89 | 2026-11-28 | barrier A/B: drop global UAV waits (clamp+groups) | 1.9 | 4.8 | 17.9 | 145 | unchecked | 38* | [chart](test-89.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
