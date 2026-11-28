@@ -163,5 +163,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 134 | 2026-11-28 | * TITLE SETTINGS LOW (lodScale0.5/grassLod0/vehHD0/cull2/nodmg): clea... | 1.6 | 4 | 15.5 | 136 | unchecked | 43* | [chart](test-134.svg) |
 | 135 | 2026-11-28 | TITLE SETTINGS LOW + crit-path: does present_wait/worker CPU DROP (ve... | 2.2 | 4.6 | 15.8 | 145 | unchecked | 35* | [chart](test-135.svg) |
 | 136 | 2026-11-28 | * SAMPLING PROFILER: top hot TITLE-code RVAs on worker threads -> fee... | 1.9 | 4.2 | 15.6 | 145 | unchecked | 35* | [chart](test-136.svg) |
+| 137 | 2026-11-28 | MATCHED baseline NORMAL settings (same rennet exe) vs lod-fps - resto... | 2.2 | 4.2 | 15.6 | 143 | unchecked | 36* | [chart](test-137.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
