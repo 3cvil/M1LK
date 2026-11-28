@@ -107,5 +107,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 78 | 2026-11-27 | STACK off, same exe, A/B 1 - does a big CPU-prep cut move fps? | 1.6 | 4 | 16.4 | 146 | unchecked | 42* | [chart](test-78.svg) |
 | 79 | 2026-11-27 | STACK on, A/B 2 - does a big CPU-prep cut move fps? | 2.1 | 4.2 | 16.8 | 142 | unchecked | 42* | [chart](test-79.svg) |
 | 80 | 2026-11-28 | STACK off, A/B 2 - does a big CPU-prep cut move fps? | 1.1 | 3.8 | 17.6 | 140 | unchecked | 40* | [chart](test-80.svg) |
+| 81 | 2026-11-28 | M1LK Churn Clock: GPU timestamps on host queue (stack on) | 1.4 | 4.3 | 16.9 | 140 | unchecked | 42* | [chart](test-81.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
