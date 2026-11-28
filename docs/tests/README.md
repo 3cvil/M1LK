@@ -139,5 +139,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 110 | 2026-11-28 | * TEXTURE USE: measure never-read texture MB (VRAM evictable lower bo... | 2 | 4.2 | 16.6 | 146 | unchecked | 42* | [chart](test-110.svg) |
 | 111 | 2026-11-28 | * idle-split: free_to_drop vs held_by_slot of stale textures - decide... | 1.6 | 3.9 | 16.6 | 145 | unchecked | 39* | [chart](test-111.svg) |
 | 112 | 2026-11-28 | repeat idle-split: confirm free_to_drop=0 / stale pinned (1 run so fa... | 1.4 | 3.9 | 16.3 | 152 | unchecked | 42* | [chart](test-112.svg) |
+| 113 | 2026-11-28 | table-cache A/B baseline (hash swap off): descriptor_copy tprof + fps | 1.8 | 4.2 | 16.7 | 146 | unchecked | 42* | [chart](test-113.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
