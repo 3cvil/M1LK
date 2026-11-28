@@ -163,7 +163,7 @@ pub(crate) fn lap(stage: S, since: Instant) -> Instant {
         return since;
     }
     let now = Instant::now();
-    US[stage as usize].fetch_add(now.saturating_duration_since(since).as_micros() as u64, Relaxed);
+    bump(stage, now.saturating_duration_since(since).as_micros() as u64);
     now
 }
 
@@ -173,7 +173,192 @@ pub(crate) fn add_us(stage: S, micros: u64) {
     if !on() {
         return;
     }
-    US[stage as usize].fetch_add(micros, Relaxed);
+    bump(stage, micros);
+}
+
+// ---- (M1LK Crit Path) the title thread that presents: where its frame goes ----
+
+/// `VICTORY_CRIT_PATH=1` (with the profiler on): the stages run on the thread that calls the
+/// title's present are summed apart, with its present-to-present time and its CPU time.
+pub(crate) fn crit_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = on() && std::env::var("VICTORY_CRIT_PATH").is_ok_and(|v| v.trim() == "1");
+        if on {
+            tracing::info!("M1LK Crit Path: on (the thread that calls the title's present)");
+        }
+        on
+    })
+}
+
+static CRIT_US: [AtomicU64; STAGES] = [const { AtomicU64::new(0) }; STAGES];
+/// Nanoseconds: present-to-present on the thread, inside `present`, CPU time, recording
+/// (`tprof`, exclusive), `Lines` inside `present` (us); and the presents counted.
+static CRIT_FRAME_NS: AtomicU64 = AtomicU64::new(0);
+static CRIT_PRESENT_NS: AtomicU64 = AtomicU64::new(0);
+static CRIT_CPU_NS: AtomicU64 = AtomicU64::new(0);
+static CRIT_RECORD_NS: AtomicU64 = AtomicU64::new(0);
+static CRIT_LINES_IN_PRESENT_US: AtomicU64 = AtomicU64::new(0);
+static CRIT_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// The thread that presents: the first to call `present`.
+static CRIT_THREAD: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static THIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static IN_PRESENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The start of the last present on this thread, and its CPU time then (ns).
+    static LAST: std::cell::Cell<Option<(Instant, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+fn this_thread() -> u64 {
+    THIS.with(|t| {
+        if t.get() == 0 {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            t.set(NEXT.fetch_add(1, Relaxed));
+        }
+        t.get()
+    })
+}
+
+/// Whether this is the presenting thread (once one is known).
+#[inline]
+pub(crate) fn is_crit() -> bool {
+    crit_on() && CRIT_THREAD.load(Relaxed) == this_thread()
+}
+
+/// CPU time (user and kernel) of this thread in ns; 0 where it cannot be read.
+fn thread_cpu_ns() -> u64 {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut create, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
+        // SAFETY: the pseudo handle of this thread and four out values.
+        let ok = unsafe { GetThreadTimes(GetCurrentThread(), &mut create, &mut exit, &mut kernel, &mut user) };
+        let ticks = |t: FILETIME| u64::from(t.dwHighDateTime) << 32 | u64::from(t.dwLowDateTime);
+        if ok != 0 { (ticks(kernel) + ticks(user)) * 100 } else { 0 }
+    }
+    #[cfg(not(windows))]
+    0
+}
+
+/// The title's present is running on this thread: the frame ends here for the previous one.
+pub(crate) struct CritPresent(Option<Instant>);
+
+impl CritPresent {
+    #[inline]
+    pub(crate) fn new() -> CritPresent {
+        if !crit_on() {
+            return CritPresent(None);
+        }
+        let me = this_thread();
+        let _ = CRIT_THREAD.compare_exchange(0, me, Relaxed, Relaxed);
+        if CRIT_THREAD.load(Relaxed) != me {
+            return CritPresent(None);
+        }
+        let now = Instant::now();
+        let cpu = thread_cpu_ns();
+        if let Some((last, cpu_last)) = LAST.with(std::cell::Cell::get) {
+            CRIT_FRAME_NS.fetch_add(now.saturating_duration_since(last).as_nanos() as u64, Relaxed);
+            CRIT_CPU_NS.fetch_add(cpu.saturating_sub(cpu_last), Relaxed);
+            CRIT_FRAMES.fetch_add(1, Relaxed);
+        }
+        LAST.with(|l| l.set(Some((now, cpu))));
+        IN_PRESENT.with(|p| p.set(true));
+        CritPresent(Some(now))
+    }
+}
+
+impl Drop for CritPresent {
+    fn drop(&mut self) {
+        if let Some(began) = self.0 {
+            CRIT_PRESENT_NS.fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
+            IN_PRESENT.with(|p| p.set(false));
+        }
+    }
+}
+
+/// Recording time (exclusive, `tprof`) of `ns` on this thread.
+#[inline]
+pub(crate) fn crit_record(ns: u64) {
+    if is_crit() {
+        CRIT_RECORD_NS.fetch_add(ns, Relaxed);
+    }
+}
+
+/// Adds `us` to `stage`, and to the presenting thread's own sums if this is that thread.
+#[inline]
+fn bump(stage: S, us: u64) {
+    US[stage as usize].fetch_add(us, Relaxed);
+    if is_crit() {
+        CRIT_US[stage as usize].fetch_add(us, Relaxed);
+        if matches!(stage, S::Lines) && IN_PRESENT.with(std::cell::Cell::get) {
+            CRIT_LINES_IN_PRESENT_US.fetch_add(us, Relaxed);
+        }
+    }
+}
+
+/// What of a frame the title's own code took on the presenting thread: the frame less
+/// `present`, the `lines` run outside it and the recording (all in the same unit).
+pub(crate) fn crit_title_time(frame: u64, present: u64, lines: u64, lines_in_present: u64, record: u64) -> u64 {
+    frame
+        .saturating_sub(present)
+        .saturating_sub(lines.saturating_sub(lines_in_present))
+        .saturating_sub(record)
+}
+
+/// The presenting thread's line, over the presents it made; takes the sums.
+fn crit_line() {
+    if !crit_on() {
+        return;
+    }
+    let frames = CRIT_FRAMES.swap(0, Relaxed);
+    let take = |a: &AtomicU64| a.swap(0, Relaxed);
+    let (frame_ns, present_ns, cpu_ns, record_ns, lip_us) = (
+        take(&CRIT_FRAME_NS),
+        take(&CRIT_PRESENT_NS),
+        take(&CRIT_CPU_NS),
+        take(&CRIT_RECORD_NS),
+        take(&CRIT_LINES_IN_PRESENT_US),
+    );
+    let us: Vec<u64> = CRIT_US.iter().map(take).collect();
+    if frames == 0 {
+        return;
+    }
+    let f = frames as f64;
+    let ms_ns = |ns: u64| ns as f64 / 1_000_000.0 / f;
+    let ms_us = |us: u64| us as f64 / 1000.0 / f;
+    let g = |s: S| us[s as usize];
+    let title = crit_title_time(frame_ns, present_ns, g(S::Lines) * 1000, lip_us * 1000, record_ns);
+    let fence = g(S::SyncWait) + g(S::LateCardWait);
+    let lock = g(S::SubmitLock) + g(S::LinesGate) + g(S::LinesHeldLock);
+    let steps = g(S::StepCopy) + g(S::StepFill) + g(S::StepRun) + g(S::StepHost) + g(S::StepGpuWrite) + g(S::StepTexture) + g(S::StepLoop);
+    tracing::info!(
+        "M1LK Crit Path ms/frame (presents={frames}): present_wait={:.2} record={:.2} settle={:.2} sweep={:.2} \
+         refresh={:.2} texture={:.2} build={:.2} submit={:.2} gpu_wait={:.2} present={:.2} | \
+         thread_running={:.2} thread_blocked_fence={:.2} thread_blocked_lock={:.2} frame_total={:.2} | \
+         lines={:.2} sync_heaps={:.2} make_waiting={:.2} settle_mid={:.2} step_total={:.2}",
+        ms_ns(title),
+        ms_ns(record_ns),
+        ms_us(g(S::SettleBefore)),
+        ms_us(g(S::Sweep)),
+        ms_us(g(S::Refresh)),
+        ms_us(g(S::StepTexture)),
+        ms_us(g(S::SubmitBuild)),
+        ms_us(g(S::Execute) + g(S::Tail) + g(S::LateTail)),
+        ms_us(fence),
+        ms_ns(present_ns),
+        ms_ns(cpu_ns),
+        ms_us(fence),
+        ms_us(lock),
+        ms_ns(frame_ns),
+        ms_us(g(S::Lines)),
+        ms_us(g(S::SyncHeaps)),
+        ms_us(g(S::MakeWaiting)),
+        ms_us(g(S::SettleMid)),
+        ms_us(steps),
+    );
 }
 
 /// Adds `n` to count `c`.
@@ -202,7 +387,7 @@ pub(crate) fn refreshed(micros: u64) {
 /// it taken out ([`refreshed_so_far`]).
 #[inline]
 pub(crate) fn nested(stage: S, micros: u64) {
-    US[stage as usize].fetch_add(micros, Relaxed);
+    bump(stage, micros);
     REFRESHED.with(|r| r.set(r.get() + micros));
 }
 
@@ -242,7 +427,7 @@ impl Steps {
         if let Some((stage, since, nested_then)) = self.current.take() {
             let nested = refreshed_so_far().saturating_sub(nested_then);
             let us = (now.saturating_duration_since(since).as_micros() as u64).saturating_sub(nested);
-            US[stage as usize].fetch_add(us, Relaxed);
+            bump(stage, us);
             self.parts += us;
         }
     }
@@ -257,7 +442,7 @@ impl Drop for Steps {
         self.close(now);
         let nested = refreshed_so_far().saturating_sub(self.nested_at_start);
         let whole = (now.saturating_duration_since(began).as_micros() as u64).saturating_sub(nested);
-        US[S::StepLoop as usize].fetch_add(whole.saturating_sub(self.parts), Relaxed);
+        bump(S::StepLoop, whole.saturating_sub(self.parts));
         N[C::Steps as usize].fetch_add(self.steps, Relaxed);
     }
 }
@@ -345,6 +530,7 @@ pub(crate) fn line(frames: f64) {
         let _ = write!(text, " {name}={:.1}", n.swap(0, Relaxed) as f64 / frames);
     }
     tracing::info!("submit profile ms/frame:{text}");
+    crit_line();
 }
 
 /// Adds the time from its making to its drop to a stage.
@@ -390,7 +576,7 @@ impl Split {
         if let Some(last) = self.last {
             let now = Instant::now();
             let us = now.saturating_duration_since(last).as_micros() as u64;
-            US[stage as usize].fetch_add(us, Relaxed);
+            bump(stage, us);
             self.parts += us;
             self.last = Some(now);
         }
@@ -411,12 +597,12 @@ impl Drop for Split {
             return;
         };
         let whole = start.elapsed().as_micros() as u64;
-        US[self.whole as usize].fetch_add(whole, Relaxed);
-        US[self.rest as usize].fetch_add(whole.saturating_sub(self.parts), Relaxed);
+        bump(self.whole, whole);
+        bump(self.rest, whole.saturating_sub(self.parts));
         if let Some(v) = self.victory
             && on_victory_thread()
         {
-            US[v as usize].fetch_add(whole, Relaxed);
+            bump(v, whole);
         }
     }
 }
@@ -432,6 +618,14 @@ fn on_victory_thread() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_time_is_what_the_rest_of_the_frame_leaves() {
+        // 100 frame, 20 present, lines 50 (30 of them inside present), record 10.
+        assert_eq!(crit_title_time(100, 20, 50, 30, 10), 100 - 20 - 20 - 10);
+        assert_eq!(crit_title_time(10, 20, 50, 30, 10), 0);
+        assert_eq!(crit_title_time(100, 0, 5, 9, 0), 100);
+    }
 
     #[test]
     fn every_stage_and_count_has_a_name() {
