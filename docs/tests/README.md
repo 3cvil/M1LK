@@ -113,5 +113,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 84 | 2026-11-28 | Churn Lists: per-command-list GPU time, top lists | 1.5 | 5.5 | 17.3 | 142 | unchecked | 33* | [chart](test-84.svg) |
 | 85 | 2026-11-28 | RAM: M1LK Skim Milk off, same exe, A/B 1 | 1.4 | 4.4 | 16.8 | 136 | unchecked | 41* | [chart](test-85.svg) |
 | 86 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 2.2 | 4.5 | 16.5 | 133 | unchecked | 45* | [chart](test-86.svg) |
+| 87 | 2026-11-28 | RAM: M1LK Skim Milk on (title heaps committed on first touch), A/B 1 | 2 | 4.4 | 16.5 | 133 | unchecked | 43* | [chart](test-87.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
