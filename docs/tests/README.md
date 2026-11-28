@@ -155,5 +155,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 126 | 2026-11-28 | CLEAN made fast-path on #2 | 2 | 3.8 | 15.3 | 138 | unchecked | 44* | [chart](test-126.svg) |
 | 127 | 2026-11-28 | * KEYSTONE crit-path: gpu_wait vs record vs present_wait - is frame G... | 2 | 4.1 | 15.7 | 144 | unchecked | 43* | [chart](test-127.svg) |
 | 128 | 2026-11-28 | * A-vs-B: present-thread wait classify (fence_gpu vs fence_cpu/other/... | 2.2 | 4.2 | 15.6 | 138 | unchecked | 43* | [chart](test-128.svg) |
+| 129 | 2026-11-28 | * A-vs-B: present-thread wait classify (fence_gpu vs fence_cpu/other/... | 1.4 | 3.3 | 15.7 | 129 | unchecked | 43* | [chart](test-129.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
