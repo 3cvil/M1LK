@@ -64,6 +64,8 @@ mod prof;
 mod tprof;
 #[cfg(windows)]
 pub mod waitlog;
+#[cfg(windows)]
+mod ipsample;
 pub mod list;
 pub mod object;
 pub mod pipeline;

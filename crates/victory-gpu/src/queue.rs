@@ -892,6 +892,8 @@ extern "system" fn present(
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::copystat::present_begins();
     #[cfg(windows)]
+    crate::ipsample::start_once();
+    #[cfg(windows)]
     let _crit = crate::prof::CritPresent::new();
     // Submissions sent to the card and not waited for are settled first,
     // and what that frees runs in its own order, before anything is forced.
