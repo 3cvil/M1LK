@@ -326,6 +326,7 @@ impl State {
             ONCE.call_once(|| tracing::warn!("a list ran again after its descriptor tables were given back"));
         }
         for (heap, first, n) in self.dynamic.drain(..) {
+            let _t = crate::tprof::Scope::new(crate::tprof::B::DcDynAlloc);
             crate::descriptor::release_dynamic(heap, first, n, false);
         }
         self.fresh_tables.clear();
@@ -3138,7 +3139,7 @@ impl State {
             return;
         };
         if let Some(view) = host.mirror(index, handle, true) {
-            let ready = readable(list, u.kind, &view);
+            let ready = readable_dc(list, u.kind, &view);
             // Leave a failed upload queued so a later draw can sample it by index.
             if crate::descriptor::host::is_texture_view(&view) {
                 host.texture_slot_tabled(index, ready);
@@ -3251,6 +3252,7 @@ impl State {
             }
             // The table and what its entries hold (record words).
             let key = {
+                let _t = crate::tprof::Scope::new(crate::tprof::B::DcHash);
                 let mut h = if table_cache_on() {
                     TableHash::new()
                 } else {
@@ -3276,7 +3278,7 @@ impl State {
                 for u in entries.iter().filter(|u| u.kind != ResourceType::Cbv) {
                     let handle = table + u64::from(u.table_offset_dwords) * 4;
                     if let Some(view) = crate::descriptor::view(handle) {
-                        readable(list, u.kind, &view);
+                        readable_dc(list, u.kind, &view);
                     }
                 }
                 for k in selected {
@@ -3287,13 +3289,16 @@ impl State {
                     if let Some(view) = crate::descriptor::view(handle)
                         && let Some(kind) = view_kind(&view)
                     {
-                        readable(list, kind, &view);
+                        readable_dc(list, kind, &view);
                     }
                 }
                 made.push((slot, first * 32));
                 continue;
             }
-            let Some(first) = host.dynamic(n) else {
+            let Some(first) = ({
+                let _t = crate::tprof::Scope::new(crate::tprof::B::DcDynAlloc);
+                host.dynamic(n)
+            }) else {
                 // No room: the draw must not run with the title's own
                 // offsets (slots never made for it); `bind` drops it.
                 made.push((slot, u32::MAX));
@@ -3313,6 +3318,7 @@ impl State {
                 let used = entries.iter().find(|u| u.table_offset_dwords / 8 == k);
                 match crate::descriptor::view(table + u64::from(k) * 32) {
                     Some(View::Constant(address, size)) => {
+                        let _t = crate::tprof::Scope::new(crate::tprof::B::DcConstant);
                         let Some((gpu, to)) = list.scratch(u64::from(size)) else {
                             host.make_null(index);
                             continue;
@@ -3321,11 +3327,14 @@ impl State {
                         host.constant_at(index, gpu, size);
                     }
                     Some(view) => {
-                        host.make_at(index, &view);
+                        {
+                            let _t = crate::tprof::Scope::new(crate::tprof::B::DcMakeAt);
+                            host.make_at(index, &view);
+                        }
                         let kind = used.map(|u| u.kind).or_else(|| {
                             selected.binary_search(&k).ok().and_then(|_| view_kind(&view))
                         });
-                        let ready = kind.is_some_and(|kind| readable(list, kind, &view));
+                        let ready = kind.is_some_and(|kind| readable_dc(list, kind, &view));
                         // The title's slot is a table's: out of the queue
                         // of textures picked by index if the draw read it
                         // (its texture is up to date now), and made in
@@ -4080,6 +4089,12 @@ fn depth_state(texture: &ID3D12Resource, desc: Option<&D3D12_DEPTH_STENCIL_VIEW_
     } else {
         DEPTH_WRITE
     }
+}
+
+/// [`readable`] timed as part of the descriptor tables (M1LK Translate Prof).
+fn readable_dc(list: &HostList, kind: ResourceType, view: &View) -> bool {
+    let _t = crate::tprof::Scope::new(crate::tprof::B::DcReadable);
+    readable(list, kind, view)
 }
 
 fn readable(list: &HostList, kind: ResourceType, view: &View) -> bool {

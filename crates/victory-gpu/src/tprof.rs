@@ -68,9 +68,19 @@ pub(crate) enum B {
     RootUav,
     /// `State::root_srv_table`.
     RootSrvTable,
+    /// `State::tables`: the dynamic slot allocation (`HostHeap::dynamic`) and the release.
+    DcDynAlloc,
+    /// `State::tables`: `HostHeap::make_at`, the CreateView calls.
+    DcMakeAt,
+    /// `State::tables`: `readable`, the texture upload queueing and state of a view.
+    DcReadable,
+    /// `State::tables`: the constant buffer slots (scratch, deferred copy, `constant_at`).
+    DcConstant,
+    /// `State::tables`: the hash of a table's records.
+    DcHash,
 }
 
-const BUCKETS: usize = B::RootSrvTable as usize + 1;
+const BUCKETS: usize = B::DcHash as usize + 1;
 
 /// Counts summed with the buckets.
 #[derive(Clone, Copy)]
@@ -85,7 +95,7 @@ const COUNTS: usize = C::Dispatches as usize + 1;
 const NAMES: [&str; BUCKETS] = [
     "pso_bind",
     "root_set",
-    "descriptor_copy",
+    "tbl_other",
     "barrier",
     "barrier_groups",
     "indirect_clamp",
@@ -102,6 +112,11 @@ const NAMES: [&str; BUCKETS] = [
     "ensure_state",
     "root_uav",
     "root_srv_table",
+    "dyn_alloc",
+    "make_at",
+    "readable",
+    "constant_at",
+    "tbl_hash",
 ];
 
 static NS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
@@ -193,11 +208,21 @@ pub(crate) fn line(frames: f64) {
     EPOCH.fetch_add(1, Relaxed);
     let mut text = String::with_capacity(512);
     let mut total = 0u64;
-    for (name, ns) in NAMES.iter().zip(NS.iter()) {
+    let mut text_ns = [0u64; BUCKETS];
+    for (i, (name, ns)) in NAMES.iter().zip(NS.iter()).enumerate() {
         let ns = ns.swap(0, Relaxed);
+        text_ns[i] = ns;
         total = total.saturating_add(ns);
         let _ = write!(text, " {name}={:.2}", ms_per_frame(ns, frames));
     }
+    // `tbl_other` is `descriptor_copy` less its sub-buckets (exclusive times).
+    let sub = |b: B| text_ns[b as usize];
+    let desc_total = sub(B::DescriptorCopy)
+        + sub(B::DcDynAlloc)
+        + sub(B::DcMakeAt)
+        + sub(B::DcReadable)
+        + sub(B::DcConstant)
+        + sub(B::DcHash);
     let draws = N[C::Draws as usize].swap(0, Relaxed);
     let dispatches = N[C::Dispatches as usize].swap(0, Relaxed);
     let calls = (draws + dispatches).max(1) as f64;
@@ -210,6 +235,17 @@ pub(crate) fn line(frames: f64) {
         total as f64 / 1000.0 / calls,
     );
     tracing::info!("M1LK Translate Prof ms/frame (threads={threads}):{text}");
+    let part = |b: B| ms_per_frame(sub(b), frames);
+    tracing::info!(
+        "M1LK Descriptor Sub ms/frame: descriptor_copy={:.2} = dyn_alloc={:.2} make_at={:.2} readable={:.2} constant_at={:.2} tbl_hash={:.2} tbl_other={:.2}",
+        ms_per_frame(desc_total, frames),
+        part(B::DcDynAlloc),
+        part(B::DcMakeAt),
+        part(B::DcReadable),
+        part(B::DcConstant),
+        part(B::DcHash),
+        part(B::DescriptorCopy),
+    );
 }
 
 #[cfg(test)]
