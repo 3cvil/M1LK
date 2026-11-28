@@ -1,4 +1,4 @@
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::not_unsafe_ptr_arg_deref)]
 //! (M1LK Wait Handle) The title's native waits, timed on the thread that presents.
 //!
 //! Installed only with `VICTORY_WAIT_HANDLE=1`: the title's imports of the wait calls and of
