@@ -2196,7 +2196,12 @@ pub(crate) fn use_census(now: u64) -> crate::texuse::Census {
         };
         if let Some((host, _)) = made.as_ref() {
             let kind = if host.filled { Kind::Fill } else { Kind::Written };
-            census.add(kind, host.bytes(), r.host.last_read.load(std::sync::atomic::Ordering::Relaxed), now);
+            let stamp = r.host.last_read.load(std::sync::atomic::Ordering::Relaxed);
+            census.add(kind, host.bytes(), stamp, now);
+            if host.filled {
+                let held = std::sync::Arc::strong_count(host) != 1 || crate::host::references(&host.texture) != 1;
+                census.add_idle(host.bytes(), stamp, now, held);
+            }
         }
     }
     census

@@ -124,11 +124,27 @@ pub(crate) struct Census {
     pub(crate) rows: [Row; 2],
     /// Textures whose lock was busy.
     pub(crate) skipped: u64,
+    /// Title-filled copies not read for [`WINDOW`] frames (or never), split by whether the
+    /// host could let them go (nothing but their texture holds them) or a descriptor slot or
+    /// list keeps them alive (letting the texture go would free nothing, and a shader that
+    /// indexes the slot would read a copy that is gone).
+    pub(crate) idle_free: Sum,
+    pub(crate) idle_held: Sum,
 }
 
 impl Census {
     pub(crate) fn add(&mut self, kind: Kind, bytes: u64, stamp: u64, now: u64) {
         self.rows[kind as usize].add(bytes, age(stamp, now));
+    }
+
+    /// A title-filled copy of `bytes` last read at `stamp`: if idle, `held` says whether a slot
+    /// or list holds it.
+    pub(crate) fn add_idle(&mut self, bytes: u64, stamp: u64, now: u64, held: bool) {
+        if matches!(age(stamp, now), Age::Never | Age::Stale) {
+            let s = if held { &mut self.idle_held } else { &mut self.idle_free };
+            s.count += 1;
+            s.bytes += bytes;
+        }
     }
 
     fn total(&self) -> Row {
@@ -164,7 +180,7 @@ impl Census {
         };
         format!(
             "M1LK Texture Use: total={:.0} MB read_1f={:.0} read_recent={:.0} stale={:.0} never_read={:.0} \
-             (count never={} of {}) | {} | {} | frame={} window={} skipped={}",
+             (count never={} of {}) | {} | {} | frame={} window={} skipped={} | idle fills: free_to_drop={:.0} MB ({})              held_by_slot_or_list={:.0} MB ({})",
             mb(t.all),
             mb(t.now),
             mb(t.read_recent()),
@@ -177,6 +193,10 @@ impl Census {
             now,
             WINDOW,
             self.skipped,
+            mb(self.idle_free),
+            self.idle_free.count,
+            mb(self.idle_held),
+            self.idle_held.count,
         )
     }
 }
@@ -212,6 +232,18 @@ mod tests {
         assert_eq!(age(1000 - WINDOW - 1, 1000), Age::Stale);
         // A stamp from a frame after `now` (a race) is current.
         assert_eq!(age(1002, 1000), Age::Now);
+    }
+
+    #[test]
+    fn idle_split() {
+        let mb = 1u64 << 20;
+        let mut c = Census::default();
+        c.add_idle(10 * mb, 0, 500, false);
+        c.add_idle(20 * mb, 10, 500, true);
+        c.add_idle(30 * mb, 499, 500, false);
+        c.add_idle(40 * mb, 100, 500, true);
+        assert_eq!(c.idle_free, Sum { count: 1, bytes: 10 * mb });
+        assert_eq!(c.idle_held, Sum { count: 2, bytes: 60 * mb });
     }
 
     #[test]
