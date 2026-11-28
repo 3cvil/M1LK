@@ -128,5 +128,6 @@ Lighting / RT: 50 points if ray tracing was on (read from the run mode; every te
 | 99 | 2026-11-28 | * SUBMIT_THREAD=1: prep on worker off title thread. fps rise? title-t... | 1.8 | 4.2 | 16.9 | 144 | unchecked | 42* | [chart](test-99.svg) |
 | 100 | 2026-11-28 | round 5: picture fixes ported from VIctory-reloaded and Vice-Tay (sha... | 2.3 | 4.1 | 16.6 | 147 | unchecked | 42* | [chart](test-100.svg) |
 | 101 | 2026-11-28 | * TRANSLATE PROF: per-step CPU ground truth - which translation step... | 1.5 | 4.4 | 16.8 | 141 | unchecked | 43* | [chart](test-101.svg) |
+| 102 | 2026-11-28 | heap-async A/B baseline (async off, tprof on): fps + heap_buffers buc... | 1.4 | 4.5 | 19.8 | 141 | unchecked | 37* | [chart](test-102.svg) |
 
 \* score computed without every part (see `score_missing_parts` in tests.csv).
