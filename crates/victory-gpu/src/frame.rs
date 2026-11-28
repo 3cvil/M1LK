@@ -151,6 +151,17 @@ fn next_tick(kind: u32) -> (u64, Duration) {
     )
 }
 
+/// Times a pacing wait of the presenting thread (M1LK Wait Break).
+#[cfg(windows)]
+struct PaceTimer(Option<Instant>);
+
+#[cfg(windows)]
+impl Drop for PaceTimer {
+    fn drop(&mut self) {
+        crate::prof::crit_wait(crate::prof::W::Pace, self.0);
+    }
+}
+
 /// Device method: blocks until the next tick (or the time-out); an origin
 /// wait then hands out the new frame's token. Other events keep the token
 /// the title passes. Ticks are absolute (start plus whole intervals), so
@@ -163,6 +174,8 @@ pub(crate) extern "system" fn wait(
     flags: u32,
     token: *mut u64,
 ) -> HRESULT {
+    #[cfg(windows)]
+    let _paced = PaceTimer(crate::prof::crit_stamp());
     let origin = kind == ORIGIN;
     let (mut tick, mut wait) = next_tick(kind);
     let limit = Duration::from_millis(u64::from(timeout_ms));

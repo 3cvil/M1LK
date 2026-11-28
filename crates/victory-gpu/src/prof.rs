@@ -308,6 +308,86 @@ pub(crate) fn crit_title_time(frame: u64, present: u64, lines: u64, lines_in_pre
         .saturating_sub(record)
 }
 
+/// How a fence wait on the presenting thread ended: what set the fence's value.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(usize)]
+pub(crate) enum W {
+    /// Behind submissions sent to the card (`Late::Signal`): the card ran the work first.
+    FenceGpu,
+    /// A signal a queue held behind its waits and submissions (`Held::Signal`).
+    FenceHeld,
+    /// The title's own `Signal` call on the CPU (another of its threads).
+    FenceCpu,
+    /// `frame::wait`, the pacing sleep.
+    Pace,
+    /// The swap chain's `Present` call.
+    PresentBlock,
+}
+
+const WAITS: usize = W::PresentBlock as usize + 1;
+const WAIT_NAMES: [&str; WAITS] = ["fence_gpu", "fence_held", "fence_cpu", "pace", "present_block"];
+static WB_NS: [AtomicU64; WAITS] = [const { AtomicU64::new(0) }; WAITS];
+static WB_N: [AtomicU64; WAITS] = [const { AtomicU64::new(0) }; WAITS];
+/// `GetCompletedValue` calls of the presenting thread.
+static WB_COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+/// The time now if this is the presenting thread (for [`crit_wait`]).
+#[inline]
+pub(crate) fn crit_stamp() -> Option<Instant> {
+    is_crit().then(Instant::now)
+}
+
+/// A wait of kind `w` that began at `since` (from [`crit_stamp`]) ended now.
+#[inline]
+pub(crate) fn crit_wait(w: W, since: Option<Instant>) {
+    if let Some(since) = since {
+        WB_NS[w as usize].fetch_add(since.elapsed().as_nanos() as u64, Relaxed);
+        WB_N[w as usize].fetch_add(1, Relaxed);
+    }
+}
+
+/// The presenting thread read a fence's completed value.
+#[inline]
+pub(crate) fn crit_completed() {
+    if is_crit() {
+        WB_COMPLETED.fetch_add(1, Relaxed);
+    }
+}
+
+/// The frame's time the thread did not run, less what the classified waits took.
+pub(crate) fn unclassified(frame_ns: u64, running_ns: u64, classified_ns: u64) -> u64 {
+    frame_ns.saturating_sub(running_ns).saturating_sub(classified_ns)
+}
+
+/// The wait line of the presenting thread; takes the sums.
+fn wait_line(frames: u64, frame_ns: u64, cpu_ns: u64) {
+    let f = frames as f64;
+    let ns: Vec<u64> = WB_NS.iter().map(|a| a.swap(0, Relaxed)).collect();
+    let n: Vec<u64> = WB_N.iter().map(|a| a.swap(0, Relaxed)).collect();
+    let completed = WB_COMPLETED.swap(0, Relaxed);
+    let ms = |ns: u64| ns as f64 / 1_000_000.0 / f;
+    // A fence wait is timed from the title's registering its event to the value reaching it,
+    // and the title may be running part of that time: the three fence kinds are upper bounds.
+    let classified: u64 = ns.iter().sum();
+    let mut text = String::new();
+    for (name, v) in WAIT_NAMES.iter().zip(&ns) {
+        use std::fmt::Write;
+        let _ = write!(text, " {name}={:.2}", ms(*v));
+    }
+    tracing::info!(
+        "M1LK Wait Break ms/frame (presents={frames}):{text} other_wait={:.2} running={:.2} frame_total={:.2} | \
+         fence_gpu_waits={:.1} fence_held_waits={:.1} fence_cpu_waits={:.1} pace_waits={:.1} completed_calls={:.1}",
+        ms(unclassified(frame_ns, cpu_ns, classified)),
+        ms(cpu_ns),
+        ms(frame_ns),
+        n[W::FenceGpu as usize] as f64 / f,
+        n[W::FenceHeld as usize] as f64 / f,
+        n[W::FenceCpu as usize] as f64 / f,
+        n[W::Pace as usize] as f64 / f,
+        completed as f64 / f,
+    );
+}
+
 /// The presenting thread's line, over the presents it made; takes the sums.
 fn crit_line() {
     if !crit_on() {
@@ -326,6 +406,7 @@ fn crit_line() {
     if frames == 0 {
         return;
     }
+    wait_line(frames, frame_ns, cpu_ns);
     let f = frames as f64;
     let ms_ns = |ns: u64| ns as f64 / 1_000_000.0 / f;
     let ms_us = |us: u64| us as f64 / 1000.0 / f;
@@ -618,6 +699,14 @@ fn on_victory_thread() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unclassified_wait_is_blocked_time_less_the_classified() {
+        assert_eq!(unclassified(100, 15, 50), 35);
+        assert_eq!(unclassified(100, 15, 95), 0);
+        assert_eq!(unclassified(10, 15, 0), 0);
+        assert_eq!(WAIT_NAMES.len(), WAITS);
+    }
 
     #[test]
     fn title_time_is_what_the_rest_of_the_frame_leaves() {

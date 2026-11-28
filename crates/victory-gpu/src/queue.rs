@@ -497,7 +497,7 @@ pub(crate) fn release_held(all: bool) {
                     Held::Signal(fence, value) => {
                         split.skip();
                         if !crate::host::late_signal(fence, value) {
-                            crate::fence::set(fence as This, value);
+                            crate::fence::set_as(fence as This, value, crate::fence::Setter::Held);
                         }
                         split.mark(S::LinesSignal);
                     }

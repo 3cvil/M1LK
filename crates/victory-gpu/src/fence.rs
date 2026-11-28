@@ -29,7 +29,8 @@ struct Fence {
     value: AtomicU64,
     flags: u32,
     /// Events to set once the value reaches theirs (handles as integers).
-    waiters: Mutex<Vec<(u64, usize)>>,
+    /// With when the presenting thread asked, if it did (M1LK Wait Break).
+    waiters: Mutex<Vec<(u64, usize, Option<std::time::Instant>)>>,
 }
 
 fn fence<'a>(this: This) -> &'a Fence {
@@ -76,6 +77,8 @@ extern "system" fn release(this: This) -> u32 {
     object::release_boxed::<Fence>(this)
 }
 pub(crate) extern "system" fn completed(this: This) -> u64 {
+    #[cfg(windows)]
+    crate::prof::crit_completed();
     fence(this).value.load(Ordering::Acquire)
 }
 extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c_void) -> HRESULT {
@@ -106,24 +109,54 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
         tracing::warn!(value, "blocking fence wait not implemented");
         return E_NOTIMPL;
     }
-    waiters.push((value, event as usize));
+    #[cfg(windows)]
+    let asked = crate::prof::crit_stamp();
+    #[cfg(not(windows))]
+    let asked = None;
+    waiters.push((value, event as usize, asked));
     S_OK
 }
 /// Moves the fence to `value` and sets the events that waited for it.
 pub(crate) fn set(this: This, value: u64) {
+    set_as(this, value, Setter::Gpu);
+}
+
+/// What moved a fence (for the presenting thread's wait profile).
+#[derive(Clone, Copy)]
+pub(crate) enum Setter {
+    /// Behind submissions sent to the card.
+    Gpu,
+    /// A signal a queue held.
+    Held,
+    /// The title's own CPU signal.
+    Cpu,
+}
+
+pub(crate) fn set_as(this: This, value: u64, by: Setter) {
     let fence = fence(this);
     let mut waiters = fence.waiters.lock().unwrap_or_else(|e| e.into_inner());
     fence.value.store(value, Ordering::Release);
-    waiters.retain(|&(wanted, event)| {
+    waiters.retain(|&(wanted, event, asked)| {
         let reached = wanted <= value;
         if reached {
             set_event(event);
+            #[cfg(windows)]
+            crate::prof::crit_wait(
+                match by {
+                    Setter::Gpu => crate::prof::W::FenceGpu,
+                    Setter::Held => crate::prof::W::FenceHeld,
+                    Setter::Cpu => crate::prof::W::FenceCpu,
+                },
+                asked,
+            );
+            #[cfg(not(windows))]
+            let _ = (by, asked);
         }
         !reached
     });
 }
 pub(crate) extern "system" fn signal(this: This, value: u64) -> HRESULT {
-    set(this, value);
+    set_as(this, value, Setter::Cpu);
     // A queue may have waited for it: what it held runs now.
     #[cfg(windows)]
     crate::queue::skim();

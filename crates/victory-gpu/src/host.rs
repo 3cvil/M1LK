@@ -9077,7 +9077,9 @@ impl Host {
             if let Some((buffer, footprint)) = capture {
                 crate::capture::save_read_back(frame, &buffer, &footprint);
             }
+            let present_began = crate::prof::crit_stamp();
             let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            crate::prof::crit_wait(crate::prof::W::PresentBlock, present_began);
             p.meter.frame(p.hwnd);
             #[cfg(feature = "diagnostics")]
             return Some(probe.is_some_and(|b| crate::capture::black(&b)));
