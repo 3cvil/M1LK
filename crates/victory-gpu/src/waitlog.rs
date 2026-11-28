@@ -180,7 +180,7 @@ pub(crate) fn line(frames: f64) {
     let totals = rank(&waits.iter().map(|w| (w.2, w.3.ns)).collect::<Vec<_>>());
     let total = |who: &str| totals.iter().find(|t| t.0 == who).map_or(0, |t| t.1);
     let mut order: Vec<_> = waits.iter().collect();
-    order.sort_by(|a, b| b.3.ns.cmp(&a.3.ns));
+    order.sort_by_key(|w| std::cmp::Reverse(w.3.ns));
     let mut text = String::new();
     for (i, (kind, handle, who, e)) in order.iter().take(3).enumerate() {
         use std::fmt::Write;
