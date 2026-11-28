@@ -728,6 +728,10 @@ pub(crate) fn completed_texture_uploads() -> Option<u64> {
 /// read it. A busy queue leaves the write pending.
 pub(crate) fn with_idle_texture_descriptors(write: impl FnOnce()) -> bool {
     let Some(host) = host() else { return false };
+    // (VICTORY_SUBMIT_THREAD) Work not yet submitted may read the slot too.
+    if submit_pending() {
+        return false;
+    }
     let Ok(submitted) = host.submitted.try_lock() else { return false };
     if completed_texture_uploads().is_none_or(|completed| completed < *submitted) {
         return false;
@@ -3475,6 +3479,17 @@ pub(crate) fn late_signal(fence: usize, value: u64) -> bool {
     if !late() {
         return false;
     }
+    // (VICTORY_SUBMIT_THREAD) Behind the submissions the worker has not
+    // run yet: the worker signals after them, in order.
+    if submit_thread() && !on_submit_worker() {
+        let mut jobs = jobs();
+        if jobs.pending() > 0 {
+            jobs.push(Job::Signal(fence, value));
+            drop(jobs);
+            JOBS_MOVED.notify_one();
+            return true;
+        }
+    }
     let mut line = line();
     if line.line.is_empty() && !line.settling {
         return false;
@@ -3497,6 +3512,12 @@ pub(crate) fn late_signal(fence: usize, value: u64) -> bool {
 /// the value in a way not known here (shaders, a timestamp, another
 /// width), they are settled and memory is asked again.
 pub(crate) fn late_met(wait: &crate::list::ValueWait) -> bool {
+    // (VICTORY_SUBMIT_THREAD) Submissions the worker has not run may write
+    // the value: not met yet. The worker pokes the helper thread after
+    // each, which looks at what queues hold again.
+    if submit_thread() && !on_submit_worker() && submit_pending() {
+        return false;
+    }
     let (address, bytes) = wait.place();
     let end = address.saturating_add(bytes);
     let exact = {
@@ -3565,8 +3586,253 @@ pub(crate) fn settle_now(why: usize) {
     let Some(host) = host() else {
         return;
     };
+    // (VICTORY_SUBMIT_THREAD) What the title gave the worker is in the air
+    // (and settled below) before anything is observed.
+    submit_drain();
     let mut submitted = host.submitted.lock().unwrap_or_else(|e| e.into_inner());
     host.settle(&mut submitted, why);
+}
+
+/// The submit worker (`VICTORY_SUBMIT_THREAD=1`; off by default, needs
+/// [`late`]). A title's queue submission with [`late`] was prepared on the
+/// title's own thread, inside its `ExecuteCommandLists`: settling what
+/// they read, the sweep, refreshing copies of title memory, snapshots,
+/// the build. With the switch that thread only takes the host lists from
+/// the title's ([`crate::list::detach`]) and gives them, with the order
+/// they run in, to one thread that runs [`Host::execute_late_now`] for each
+/// in turn. The title goes on to its next call at once.
+///
+/// Order: one FIFO, one worker, so submissions reach the card in the order
+/// the title made them, and the fence signals behind them ([`Job::Signal`],
+/// from [`late_signal`]) are set after them. Every call that can observe
+/// what the work does, or that sends work of its own, first waits for the
+/// FIFO to be empty and the worker idle ([`submit_drain`]): [`Host::submit`]
+/// (so every synchronous submission: a present's copy, a read-back or map,
+/// a clear) and [`settle_now`] (present, a fence wait without an event, a
+/// read-back's wait). A queue's wait for a memory value counts as unmet
+/// while the worker holds work ([`late_met`]) and is looked at again when
+/// the worker has run a job.
+///
+/// What is now read later than before: everything `Host::submit_part`
+/// reads of title memory (refreshes of copies of title buffers, upload
+/// memory fills, snapshots, texture memory, steps of ours that run on title
+/// memory) is read when the worker reaches the submission, not when the
+/// title calls `ExecuteCommandLists`. That is the assumption [`late`]
+/// already makes of the next submission (memory the title rewrites without
+/// waiting may be seen by an earlier submission) stretched to the worker's
+/// lag. Fences the title waits on are set by the worker behind the
+/// submissions that precede them, after their prepare and after the card
+/// has run them, so memory a fence guards is not rewritten before it was
+/// read. Memory rewritten with no fence between two submissions is the one
+/// way this can differ from the card reading at the time it runs: the lag
+/// is bounded by [`submit_depth`] jobs.
+pub(crate) fn submit_thread() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = late() && std::env::var_os("VICTORY_SUBMIT_THREAD").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!(depth = submit_depth(), "M1LK Churn: submit worker thread on");
+        }
+        on
+    })
+}
+
+/// Most jobs the worker holds before the title waits (`VICTORY_SUBMIT_THREAD_DEPTH`).
+fn submit_depth() -> usize {
+    static DEPTH: OnceLock<usize> = OnceLock::new();
+    *DEPTH.get_or_init(|| {
+        std::env::var("VICTORY_SUBMIT_THREAD_DEPTH").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(64)
+    })
+}
+
+/// A first-in first-out line with one job in hand: [`Fifo::pending`] counts
+/// that job until it is finished.
+struct Fifo<T> {
+    items: std::collections::VecDeque<T>,
+    busy: bool,
+}
+
+impl<T> Fifo<T> {
+    const fn new() -> Self {
+        Fifo { items: std::collections::VecDeque::new(), busy: false }
+    }
+    fn pending(&self) -> usize {
+        self.items.len() + usize::from(self.busy)
+    }
+    fn push(&mut self, item: T) {
+        self.items.push_back(item);
+    }
+    /// The oldest job, now in hand.
+    fn start(&mut self) -> Option<T> {
+        let item = self.items.pop_front()?;
+        self.busy = true;
+        Some(item)
+    }
+    fn finish(&mut self) {
+        self.busy = false;
+    }
+}
+
+enum Job {
+    /// A queue's submission: the host lists taken from the title's, in the order they run.
+    Run(Vec<crate::list::Detached>, Vec<usize>),
+    /// A fence (its address) signalled behind the jobs before it.
+    Signal(usize, u64),
+}
+
+// SAFETY: as `Line`: D3D12 objects (free-threaded) and host lists nothing
+// records into; each job is handed over whole and used by one thread.
+unsafe impl Send for Job {}
+
+static JOBS: Mutex<Fifo<Job>> = Mutex::new(Fifo::new());
+/// Told when a job joins [`JOBS`].
+static JOBS_MOVED: std::sync::Condvar = std::sync::Condvar::new();
+/// Told when the worker has finished a job.
+static JOBS_DONE: std::sync::Condvar = std::sync::Condvar::new();
+/// The worker's thread id (0 before it runs).
+static SUBMIT_WORKER: AtomicU32 = AtomicU32::new(0);
+/// Times the title waited for room and microseconds; drains and microseconds.
+static SUBMIT_WAITS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+fn jobs() -> std::sync::MutexGuard<'static, Fifo<Job>> {
+    JOBS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn on_submit_worker() -> bool {
+    let worker = SUBMIT_WORKER.load(Ordering::Relaxed);
+    worker != 0 && thread_id() == worker
+}
+
+/// Whether the worker holds work (running or waiting).
+fn submit_pending() -> bool {
+    submit_thread() && jobs().pending() > 0
+}
+
+/// Gives `job` to the worker, starting it the first time. A submission
+/// waits for room first, so what the worker holds stays bounded.
+fn submit_enqueue(job: Job) {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        if let Err(e) = std::thread::Builder::new().name("victory-submit".into()).spawn(submit_worker) {
+            fail(format_args!("no thread to run the title's submissions (VICTORY_SUBMIT_THREAD=1): {e}"));
+        }
+    });
+    let mut jobs = jobs();
+    if jobs.pending() >= submit_depth() {
+        let waiting = Instant::now();
+        let was_working = working(false);
+        while jobs.pending() >= submit_depth() {
+            jobs = JOBS_DONE.wait(jobs).unwrap_or_else(|e| e.into_inner());
+        }
+        working(was_working);
+        SUBMIT_WAITS[0].fetch_add(1, Ordering::Relaxed);
+        SUBMIT_WAITS[1].fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
+    jobs.push(job);
+    drop(jobs);
+    JOBS_MOVED.notify_one();
+}
+
+/// Waits until the worker has run everything it was given. Not on the
+/// worker itself. Gives up after a minute, once, in the log: a wait that
+/// long is a deadlock, and a hung title is worse than a late one.
+fn submit_drain() {
+    if !submit_thread() || on_submit_worker() {
+        return;
+    }
+    let mut jobs = jobs();
+    if jobs.pending() == 0 {
+        return;
+    }
+    let waiting = Instant::now();
+    let was_working = working(false);
+    while jobs.pending() > 0 {
+        let (next, timeout) = JOBS_DONE.wait_timeout(jobs, Duration::from_secs(1)).unwrap_or_else(|e| e.into_inner());
+        jobs = next;
+        if timeout.timed_out() && waiting.elapsed() > Duration::from_secs(60) {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::error!("the submit worker did not finish in a minute: going on without it"));
+            break;
+        }
+    }
+    drop(jobs);
+    working(was_working);
+    SUBMIT_WAITS[2].fetch_add(1, Ordering::Relaxed);
+    SUBMIT_WAITS[3].fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
+}
+
+fn submit_worker() {
+    crate::cores::keep_on_fast_cores("victory-submit");
+    SUBMIT_WORKER.store(thread_id(), Ordering::Relaxed);
+    let Some(host) = host() else {
+        return;
+    };
+    let mut n = 0u64;
+    loop {
+        let job = {
+            let mut jobs = jobs();
+            loop {
+                if let Some(job) = jobs.start() {
+                    break job;
+                }
+                jobs = JOBS_MOVED.wait(jobs).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
+            Job::Run(lists, order) => host.execute_late_now(lists, order),
+            Job::Signal(fence, value) => {
+                if !late_signal(fence, value) {
+                    crate::fence::set(fence as crate::object::This, value);
+                }
+            }
+        }));
+        if ran.is_err() {
+            fail(format_args!("the submit worker panicked (VICTORY_SUBMIT_THREAD=1)"));
+        }
+        jobs().finish();
+        JOBS_DONE.notify_all();
+        // What ran may be what a queue stands at: the helper thread looks.
+        line().poke = true;
+        LINE_MOVED.notify_one();
+        n += 1;
+        if n >= 256 && n.is_power_of_two() {
+            tracing::info!(
+                jobs = n,
+                full_waits = SUBMIT_WAITS[0].load(Ordering::Relaxed),
+                full_ms = SUBMIT_WAITS[1].load(Ordering::Relaxed) / 1000,
+                drains = SUBMIT_WAITS[2].load(Ordering::Relaxed),
+                drain_ms = SUBMIT_WAITS[3].load(Ordering::Relaxed) / 1000,
+                "submit worker"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod submit_fifo_tests {
+    use super::Fifo;
+
+    #[test]
+    fn jobs_come_out_in_order_and_the_one_in_hand_counts() {
+        let mut fifo = Fifo::new();
+        assert_eq!(fifo.pending(), 0);
+        fifo.push(1);
+        fifo.push(2);
+        assert_eq!(fifo.pending(), 2);
+        assert_eq!(fifo.start(), Some(1));
+        // One in hand, one waiting.
+        assert_eq!(fifo.pending(), 2);
+        fifo.push(3);
+        fifo.finish();
+        assert_eq!(fifo.pending(), 2);
+        assert_eq!(fifo.start(), Some(2));
+        fifo.finish();
+        assert_eq!(fifo.start(), Some(3));
+        assert_eq!(fifo.pending(), 1);
+        fifo.finish();
+        assert_eq!(fifo.pending(), 0);
+        assert_eq!(fifo.start(), None);
+    }
 }
 
 /// [`settle_now`] at a present, and for a fence the title blocks on.
@@ -5517,7 +5783,22 @@ impl Host {
     /// the air, at the next point where what they do can be observed
     /// ([`late`] lists those points); their host lists are reset and kept
     /// for reuse then, as a queue does for the lists it ran.
-    pub(crate) fn execute_late(&self, mut lists: Vec<crate::list::Detached>, mut order: Vec<usize>) {
+    pub(crate) fn execute_late(&self, lists: Vec<crate::list::Detached>, order: Vec<usize>) {
+        // (VICTORY_SUBMIT_THREAD) Given to the submit worker, which runs
+        // [`Host::execute_late_now`] for each in the order given.
+        if submit_thread() && !on_submit_worker() {
+            if order.is_empty() {
+                crate::list::recycle(lists, &order);
+                return;
+            }
+            submit_enqueue(Job::Run(lists, order));
+            return;
+        }
+        self.execute_late_now(lists, order);
+    }
+
+    /// [`Host::execute_late`], on the calling thread.
+    fn execute_late_now(&self, mut lists: Vec<crate::list::Detached>, mut order: Vec<usize>) {
         if order.is_empty() {
             crate::list::recycle(lists, &order);
             return;
@@ -5787,6 +6068,9 @@ impl Host {
         let mut called = std::time::Instant::now();
         // One submission at a time from preparation to copy-back: snapshots
         // and the ranges shaders write are per host copy, not per submission.
+        // (VICTORY_SUBMIT_THREAD) Whatever the title gave the worker goes to
+        // the card first: the card runs submissions in the order made.
+        submit_drain();
         let locking = crate::prof::on().then(std::time::Instant::now);
         let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(since) = locking {
